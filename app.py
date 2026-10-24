@@ -1,6 +1,6 @@
 # =====================================================================================
-#  SMART ROUTE REBALANCER — ENTERPRISE GATED STEP-BY-STEP EDITION v6.2
-#  Fixed Session State Initialization & Slider Callback Error
+#  SMART ROUTE REBALANCER — ENTERPRISE GATED STEP-BY-STEP EDITION v6.3
+#  Full Session State Guard & Robust Flow Architecture
 # =====================================================================================
 from __future__ import annotations
 
@@ -31,6 +31,12 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# Initialize Session State early to prevent AttributeError
+if 'truck_pcts' not in st.session_state:
+    st.session_state.truck_pcts = {}
+if 'raw_key' not in st.session_state:
+    st.session_state.raw_key = ""
 
 # =====================================================================================
 #  SECTION 1 — CONSTANTS & DOMAIN MODEL
@@ -240,7 +246,7 @@ def diagnose_fleet(df: pd.DataFrame, cfg: ZoningConfig) -> pd.DataFrame:
 # =====================================================================================
 #  SECTION 5 — UI & GATED STEP-BY-STEP EXECUTION
 # =====================================================================================
-st.title("🚛 Smart Route Rebalancer — Enterprise v6.2")
+st.title("🚛 Smart Route Rebalancer — Enterprise v6.3")
 st.markdown("<div style='color:#64748B; font-weight:600; margin-bottom:1rem;'>ระบบวิเคราะห์และตัดสายส่งน้ำอัตโนมัติ (Step-by-Step Enterprise Edition)</div>", unsafe_allow_html=True)
 
 # --- STEP 1: LOAD DATA ---
@@ -267,11 +273,13 @@ def load_sheet(url: str, gid: str):
 df_raw = None
 if sheet_url:
     key = f"{sheet_url}::{sheet_gid}"
-    if st.session_state.get('raw_key') != key:
+    if st.session_state.raw_key != key:
         ph = st.empty()
         show_loader(ph, "กำลังเชื่อมต่อฐานข้อมูลองค์กร... 💧")
         raw, err = load_sheet(sheet_url, sheet_gid)
-        st.session_state.update({'raw_df': raw, 'raw_err': err, 'raw_key': key})
+        st.session_state['raw_df'] = raw
+        st.session_state['raw_err'] = err
+        st.session_state['raw_key'] = key
         reset_results()
         ph.empty()
     df_raw = st.session_state.get('raw_df')
@@ -393,10 +401,6 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("### 🎛️ 7. เป้าหมายรายคัน (%)")
 depot_fp_key = ",".join(sorted(selected_depots)) if selected_depots else "all"
 fingerprint = "|".join([sheet_url, sheet_gid, depot_fp_key, vol_col, truck_col, day_col, str(sorted(dissolve_trucks)), str(sorted(relieve_trucks)), str(new_trucks), str(sorted(exclude_trucks)), f"{monthly_cap}", f"{daily_cap}", f"{depot_lat}", f"{depot_lon}"])
-
-# Safe initialization for session state truck_pcts
-if 'truck_pcts' not in st.session_state:
-    st.session_state.truck_pcts = {}
 
 if st.sidebar.button("🔄 คำนวณเป้าหมายอัตโนมัติ"):
     st.session_state.pop('slider_fp', None)
@@ -589,6 +593,6 @@ with tab3:
         st.dataframe(rdf[f_cols].rename(columns={truck_col: "เบอร์รถเดิม"}), use_container_width=True)
 
         csv_data = rdf[f_cols].to_csv(index=False).encode('utf-8-sig')
-        st.download_button("📥 ดาวน์โหลดผลการจัดสายส่ง (CSV)", csv_data, 'sprinkle_rebalance_enterprise.csv', 'text/csv', use_container_width=True)
+        st.download_button("📥 ดาวน์โหลดผลการจัดสายส่ง (CSV)", csv_data, 'sprinkle_rebalance_enterprise.csv', 'text/csv', use_keyword_width=True)
     else:
         st.info("💡 กรุณากดปุ่ม '🚀 ประมวลผลจัดสายส่งใหม่' เพื่อดูตารางรายงานและดาวน์โหลดข้อมูล")

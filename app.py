@@ -1,6 +1,6 @@
 # =====================================================================================
-#  SMART ROUTE REBALANCER — MULTI-DEPOT ENTERPRISE EDITION v4.6
-#  Corrected Flow: Load Sheet -> Select Depot First -> Map Columns & Trucks
+#  SMART ROUTE REBALANCER — MULTI-DEPOT ENTERPRISE EDITION v4.7
+#  Fixed Flow: 1. Load Sheet -> 2. Select Depot First -> 3. Column Mapping & Fleet
 # =====================================================================================
 from __future__ import annotations
 
@@ -1188,8 +1188,26 @@ if df is None or df.empty:
 df = df.copy()
 cols = df.columns.tolist()
 
+# =====================================================================================
+#  STEP 2: SELECT DEPOT / BRANCH FIRST (RIGHT AFTER LOADING SHEET)
+# =====================================================================================
 st.sidebar.markdown("---")
-st.sidebar.markdown("### 🧭 2. ยืนยันคอลัมน์ข้อมูลจากชีต")
+st.sidebar.markdown("### 🏢 2. เลือกคลัง/สาขา (Depot Hub)")
+
+depot_col_guess = guess_col(['คลัง', 'สาขา', 'depot'], cols, allow_none=True)
+selected_depot = "ทั้งหมด (All Depots)"
+
+if depot_col_guess and depot_col_guess in df.columns:
+    depot_list = ["ทั้งหมด (All Depots)"] + sorted(df[depot_col_guess].dropna().astype(str).unique().tolist())
+    selected_depot = st.sidebar.selectbox("เลือกสาขาที่ต้องการทำสายส่ง:", depot_list, on_change=reset_results)
+    if selected_depot != "ทั้งหมด (All Depots)":
+        df = df[df[depot_col_guess].astype(str).str.strip() == selected_depot].reset_index(drop=True)
+
+# =====================================================================================
+#  STEP 3: COLUMN MAPPING UI
+# =====================================================================================
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🧭 3. ยืนยันคอลัมน์ข้อมูลจากชีต")
 def sel(label, keys, allow_none=False):
     g = guess_col(keys, cols, allow_none=allow_none)
     if allow_none:
@@ -1202,7 +1220,7 @@ def sel(label, keys, allow_none=False):
 
 gps_col = sel("คอลัมน์พิกัด GPS:", ['พิกัด', 'gps', 'lat'])
 depot_col = sel("คอลัมน์คลัง/สาขา:", ['คลัง', 'สาขา', 'depot'], allow_none=True)
-vol_col = sel("คอลัมน์ยอดส่งเฉลี่ย (พร้อมใช้งาน):", ['ยอดเฉลี่ย', 'ยอดส่ง', 'volume'])
+vol_col = sel("คอลัมน์ยอดส่งเฉลี่ย (ถัง/เดือน):", ['ยอดเฉลี่ย', 'ยอดส่ง', 'volume'])
 truck_col = sel("คอลัมน์เบอร์รถ:", ['เบอร์รถ', 'รถ', 'truck'])
 day_col = sel("📅 คอลัมน์รอบส่ง/วัน:", ['รอบส่ง', 'วัน', 'day'])
 id_col = sel("คอลัมน์รหัสสมาชิก:", ['รหัสสมาชิก', 'รหัส', 'id'])
@@ -1223,29 +1241,20 @@ coords_extracted = df[gps_col].apply(split_lat_lon)
 df["_lat_clean"] = [c[0] for c in coords_extracted]
 df["_lon_clean"] = [c[1] for c in coords_extracted]
 
+# ใช้งานค่ายอดส่งเฉลี่ยจากคอลัมน์ที่เลือกทันทีโดยไม่ต้องคูณเบิ้ล
 df[vol_col] = pd.to_numeric(df[vol_col], errors='coerce').fillna(0).astype(float)
 df[truck_col] = df[truck_col].astype(str).str.strip()
 df[id_col] = df[id_col].astype(str).str.strip()
 df['VIP_Status'] = df[vip_col].astype(str).str.strip() if vip_col else 'ปกติ'
 
-# =====================================================================================
-#  STEP 3: SELECT DEPOT / BRANCH AFTER LOADING DATA (FILTERING 383+ FLEET)
-# =====================================================================================
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 🏢 3. เลือกคลัง/สาขา (Depot Hub)")
-selected_depot = "ทั้งหมด (All Depots)"
-
-if depot_col and depot_col in df.columns:
-    depot_list = ["ทั้งหมด (All Depots)"] + sorted(df[depot_col].dropna().astype(str).unique().tolist())
-    selected_depot = st.sidebar.selectbox("เลือกสาขาที่ต้องการวิเคราะห์:", depot_list, on_change=reset_results)
-    if selected_depot != "ทั้งหมด (All Depots)":
-        df = df[df[depot_col].astype(str).str.strip() == selected_depot].reset_index(drop=True)
-
+# Set Depot Lat/Lon Hub dynamically based on filtered branch data
 depot_lat, depot_lon = float(df["_lat_clean"].mean()), float(df["_lon_clean"].mean())
 depot_sub = df.dropna(subset=["_lat_clean", "_lon_clean"])
 if not depot_sub.empty:
     depot_lat, depot_lon = float(depot_sub["_lat_clean"].mean()), float(depot_sub["_lon_clean"].mean())
 
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 📍 พิกัดศูนย์กลางคลัง (Depot Hub)")
 depot_lat = st.sidebar.number_input("ละติจูดคลัง (Depot Lat):", value=depot_lat, format="%6.6f", on_change=reset_results)
 depot_lon = st.sidebar.number_input("ลองจิจูดคลัง (Depot Lon):", value=depot_lon, format="%6.6f", on_change=reset_results)
 
@@ -1447,7 +1456,7 @@ with tab2:
         st.info("💡 กรุณากดปุ่ม '🚀 ประมวลผลจัดสายส่งใหม่' ที่เมนูด้านซ้ายเพื่อแสดงแผนที่")
 
 with tab3:
-    st.markdown("### 📅 ตารางวิเคราะห์โหลดรายวัน & รายละเอียดการโยกย้าย")
+    st.markdown("### 📅 ตารางวิเคราะห์โหลดรายวัน & รายรายละเอียดการโยกย้าย")
     if 'result' in st.session_state:
         res: ZoningResult = st.session_state['result']
         rdf = res.result_df
@@ -1474,6 +1483,6 @@ with tab3:
         st.dataframe(rdf[f_cols].rename(columns={truck_col: "เบอร์รถเดิม"}), use_container_width=True)
 
         csv_data = rdf[f_cols].to_csv(index=False).encode('utf-8-sig')
-        st.download_button("📥 ดาวน์โหลดผลการจัดสายส่ง (CSV)", csv_data, 'sprinkle_rebalance_enterprise.csv', 'text/csv', use_keyword_width=True)
+        st.download_button("📥 ดาวน์โหลดผลการจัดสายส่ง (CSV)", csv_data, 'sprinkle_rebalance_enterprise.csv', 'text/csv', use_container_width=True)
     else:
         st.info("💡 กรุณากดปุ่ม '🚀 ประมวลผลจัดสายส่งใหม่' เพื่อดูตารางรายงานและดาวน์โหลดข้อมูล")

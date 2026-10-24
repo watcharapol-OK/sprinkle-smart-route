@@ -1,6 +1,6 @@
 # =====================================================================================
-#  SMART ROUTE REBALANCER — MULTI-DEPOT ENTERPRISE EDITION v4.7
-#  Fixed Flow: 1. Load Sheet -> 2. Select Depot First -> 3. Column Mapping & Fleet
+#  SMART ROUTE REBALANCER — MULTI-DEPOT ENTERPRISE EDITION v4.8
+#  Multi-Depot Multi-Select Architecture + Direct Volume Integration
 # =====================================================================================
 from __future__ import annotations
 
@@ -1145,7 +1145,7 @@ def run_multi_donor_zoning(df: pd.DataFrame, cfg: ZoningConfig, target_pcts: Dic
 #  SECTION 9 — DATA IMPORT & MAPPING UI (ENTERPRISE SIDEBAR)
 # =====================================================================================
 st.title("🚛 Smart Route Rebalancer — Enterprise")
-st.markdown("<div style='color:#64748B; font-weight:600; margin-bottom:1rem;'>ระบบวิเคราะห์และตัดสายส่งน้ำอัตโนมัติ (Multi-Depot Hub-and-Spoke Architecture)</div>", unsafe_allow_html=True)
+st.markdown("<div style='color:#64748B; font-weight:600; margin-bottom:1rem;'>ระบบวิเคราะห์และตัดสายส่งน้ำอัตโนมัติ (Multi-Depot Multi-Select Hub Architecture)</div>", unsafe_allow_html=True)
 
 st.sidebar.markdown("### 📁 1. นำเข้าข้อมูลบริษัท")
 sheet_url = st.sidebar.text_input("🔗 ลิงก์ Google Sheets:", value="https://docs.google.com/spreadsheets/d/1PqliJwDoK27SCAj2nlcwkeHmDOdKEQqVcpUaRnQaTWc/edit?usp=sharing", placeholder="วางลิงก์ที่นี่...")
@@ -1167,7 +1167,7 @@ def load_sheet(url: str, gid: str):
     except Exception as e:
         return None, f"เกิดข้อผิดพลาด: {e}"
 
-df = None
+df_raw = None
 if sheet_url:
     key = f"{sheet_url}::{sheet_gid}"
     if st.session_state.get('raw_key') != key:
@@ -1177,31 +1177,35 @@ if sheet_url:
         st.session_state.update({'raw_df': raw, 'raw_err': err, 'raw_key': key})
         reset_results()
         ph.empty()
-    df = st.session_state.get('raw_df')
-    if df is None and st.session_state.get('raw_err'):
+    df_raw = st.session_state.get('raw_df')
+    if df_raw is None and st.session_state.get('raw_err'):
         st.sidebar.error(f"❌ {st.session_state['raw_err']}")
 
-if df is None or df.empty:
+if df_raw is None or df_raw.empty:
     st.info("👈 กรุณาวางลิงก์ Google Sheets ที่แถบเมนูด้านซ้าย เพื่อเริ่มต้นใช้งาน")
     st.stop()
 
-df = df.copy()
-cols = df.columns.tolist()
+df_raw = df_raw.copy()
+cols = df_raw.columns.tolist()
 
 # =====================================================================================
-#  STEP 2: SELECT DEPOT / BRANCH FIRST (RIGHT AFTER LOADING SHEET)
+#  STEP 2: MULTI-DEPOT MULTI-SELECT (CHOOSE BRANCHES FIRST)
 # =====================================================================================
 st.sidebar.markdown("---")
-st.sidebar.markdown("### 🏢 2. เลือกคลัง/สาขา (Depot Hub)")
+st.sidebar.markdown("### 🏢 2. เลือกคลัง/สาขา (รองรับหลายสาขา)")
 
 depot_col_guess = guess_col(['คลัง', 'สาขา', 'depot'], cols, allow_none=True)
-selected_depot = "ทั้งหมด (All Depots)"
+selected_depots = []
 
-if depot_col_guess and depot_col_guess in df.columns:
-    depot_list = ["ทั้งหมด (All Depots)"] + sorted(df[depot_col_guess].dropna().astype(str).unique().tolist())
-    selected_depot = st.sidebar.selectbox("เลือกสาขาที่ต้องการทำสายส่ง:", depot_list, on_change=reset_results)
-    if selected_depot != "ทั้งหมด (All Depots)":
-        df = df[df[depot_col_guess].astype(str).str.strip() == selected_depot].reset_index(drop=True)
+if depot_col_guess and depot_col_guess in df_raw.columns:
+    all_depots = sorted(df_raw[depot_col_guess].dropna().astype(str).unique().tolist())
+    selected_depots = st.sidebar.multiselect("เลือกสาขาที่ต้องการทำสายส่ง (เลือกได้มากกว่า 1):", options=all_depots, default=all_depots[:1] if all_depots else [], on_change=reset_results)
+    if selected_depots:
+        df = df_raw[df_raw[depot_col_guess].astype(str).str.strip().isin(selected_depots)].reset_index(drop=True)
+    else:
+        df = df_raw.copy()
+else:
+    df = df_raw.copy()
 
 # =====================================================================================
 #  STEP 3: COLUMN MAPPING UI
@@ -1241,22 +1245,22 @@ coords_extracted = df[gps_col].apply(split_lat_lon)
 df["_lat_clean"] = [c[0] for c in coords_extracted]
 df["_lon_clean"] = [c[1] for c in coords_extracted]
 
-# ใช้งานค่ายอดส่งเฉลี่ยจากคอลัมน์ที่เลือกทันทีโดยไม่ต้องคูณเบิ้ล
+# ใช้งานค่ายอดส่งเฉลี่ยจากคอลัมน์ที่เลือกทันทีตามจริง
 df[vol_col] = pd.to_numeric(df[vol_col], errors='coerce').fillna(0).astype(float)
 df[truck_col] = df[truck_col].astype(str).str.strip()
 df[id_col] = df[id_col].astype(str).str.strip()
-df['VIP_Status'] = df[vip_col].astype(str).str.strip() if vip_col else 'ปกติ'
+df['VIP_Status'] = vip_col and vip_col in df.columns and df[vip_col].astype(str).str.upper().str.strip().eq("VIP") or pd.Series([False]*len(df))
 
-# Set Depot Lat/Lon Hub dynamically based on filtered branch data
+# Set Depot Lat/Lon Hub dynamically based on filtered branches center of gravity
 depot_lat, depot_lon = float(df["_lat_clean"].mean()), float(df["_lon_clean"].mean())
 depot_sub = df.dropna(subset=["_lat_clean", "_lon_clean"])
 if not depot_sub.empty:
     depot_lat, depot_lon = float(depot_sub["_lat_clean"].mean()), float(depot_sub["_lon_clean"].mean())
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("### 📍 พิกัดศูนย์กลางคลัง (Depot Hub)")
-depot_lat = st.sidebar.number_input("ละติจูดคลัง (Depot Lat):", value=depot_lat, format="%6.6f", on_change=reset_results)
-depot_lon = st.sidebar.number_input("ลองจิจูดคลัง (Depot Lon):", value=depot_lon, format="%6.6f", on_change=reset_results)
+st.sidebar.markdown("### 📍 พิกัดศูนย์กลางคลังรวม (Hub Center)")
+depot_lat = st.sidebar.number_input("ละติจูดศูนย์กลาง Hub (Lat):", value=depot_lat, format="%6.6f", on_change=reset_results)
+depot_lon = st.sidebar.number_input("ลองจิจูดศูนย์กลาง Hub (Lon):", value=depot_lon, format="%6.6f", on_change=reset_results)
 
 df = df.dropna(subset=["_lat_clean", "_lon_clean"]).reset_index(drop=True)
 df = df[~df[truck_col].str.lower().isin(NO_TRUCK_TOKENS)].reset_index(drop=True)
@@ -1296,7 +1300,8 @@ active_trucks = kept_trucks + new_trucks
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🎛️ 7. เป้าหมายรายคัน (%)")
-fingerprint = "|".join([sheet_url, sheet_gid, selected_depot, vol_col, truck_col, day_col, str(sorted(dissolve_trucks)), str(sorted(relieve_trucks)), str(new_trucks), str(sorted(exclude_trucks)), f"{monthly_cap}", f"{daily_cap}", f"{depot_lat}", f"{depot_lon}"])
+depot_fp_key = ",".join(sorted(selected_depots)) if selected_depots else "all"
+fingerprint = "|".join([sheet_url, sheet_gid, depot_fp_key, vol_col, truck_col, day_col, str(sorted(dissolve_trucks)), str(sorted(relieve_trucks)), str(new_trucks), str(sorted(exclude_trucks)), f"{monthly_cap}", f"{daily_cap}", f"{depot_lat}", f"{depot_lon}"])
 if st.sidebar.button("🔄 คำนวณเป้าหมายอัตโนมัติ"):
     st.session_state.pop('slider_fp', None)
     reset_results()
@@ -1365,8 +1370,10 @@ tab1, tab2, tab3 = st.tabs([
     "📋 3. ตารางโหลดรายวันและรายละเอียด (Reports)"
 ])
 
+depot_label_text = ", ".join(selected_depots) if selected_depots else "ทั้งหมด (All Depots)"
+
 with tab1:
-    st.markdown(f"### 📈 ตัวชี้วัดผลลัพธ์เพื่อการตัดสินใจ ({selected_depot})")
+    st.markdown(f"### 📈 ตัวชี้วัดผลลัพธ์เพื่อการตัดสินใจ (สาขา: {depot_label_text})")
     if 'result' in st.session_state:
         res: ZoningResult = st.session_state['result']
         over_after = int(res.metrics['over_after'])
@@ -1383,7 +1390,7 @@ with tab1:
         with k3:
             render_enterprise_metric("ระยะทางวิ่งเฉลี่ยจากคลัง", f"{res.metrics['compact_after_km']:.2f} กม.", delta=f"{compact_diff:+.2f} กม.", status="good" if compact_diff <= 0 else "warning")
         with k4:
-            render_enterprise_metric("ลูกค้าที่โยกย้าย", f"{int(res.metrics['moved_cust']):,} ราย", delta=f"{res.metrics['moved_pct']:.1f}% ของคลัง", status="normal")
+            render_enterprise_metric("ลูกค้าที่โยกย้าย", f"{int(res.metrics['moved_cust']):,} ราย", delta=f"{res.metrics['moved_pct']:.1f}% ของสาขา", status="normal")
     else:
         k1, k2, k3, k4 = st.columns(4)
         with k1:
@@ -1391,7 +1398,7 @@ with tab1:
         with k2:
             render_enterprise_metric("รถเกินเพดาน", f"{len(overloaded)} คัน", delta=f"เพดาน {daily_cap:,.0f} ถัง/วัน", status="danger" if overloaded else "good")
         with k3:
-            render_enterprise_metric("ยอดรวมทั้งคลัง", f"{df[vol_col].sum():,.0f} ถัง/เดือน", status="normal")
+            render_enterprise_metric("ยอดรวมทั้งสาขา", f"{df[vol_col].sum():,.0f} ถัง/เดือน", status="normal")
         with k4:
             excess_total = float(diag['ส่วนเกิน/วัน'].sum()) * DAYS_PER_MONTH if not diag.empty else 0.0
             render_enterprise_metric("ยอดส่วนเกินที่ต้องย้าย", f"{excess_total:,.0f} ถัง/เดือน", status="warning" if excess_total > 0 else "good")
@@ -1409,7 +1416,7 @@ with tab1:
     st.markdown(diag_html, unsafe_allow_html=True)
 
 with tab2:
-    st.markdown(f"### 🗺️ แผนที่เปรียบเทียบเชิงพื้นที่ ({selected_depot})")
+    st.markdown(f"### 🗺️ แผนที่เปรียบเทียบเชิงพื้นที่ ({depot_label_text})")
     if 'result' in st.session_state:
         res: ZoningResult = st.session_state['result']
         rdf = res.result_df
@@ -1439,7 +1446,7 @@ with tab2:
             st.markdown("<div style='text-align:center; font-weight:700; color:#024D7B; margin-bottom:6px;'>📍 ก่อนปรับ (Before)</div>", unsafe_allow_html=True)
             mb = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles="OpenStreetMap")
             if depot_lat != 0 and depot_lon != 0:
-                folium.Marker([depot_lat, depot_lon], popup=f"<b>📌 {selected_depot}</b>", icon=folium.Icon(color='red', icon='home', prefix='fa')).add_to(mb)
+                folium.Marker([depot_lat, depot_lon], popup=f"<b>📌 Hub: {depot_label_text}</b>", icon=folium.Icon(color='red', icon='home', prefix='fa')).add_to(mb)
             for _, r in df_b.iterrows():
                 folium.CircleMarker([r["_lat_clean"], r["_lon_clean"]], radius=5, color=color_map.get(str(r[truck_col]), "#64748B"), fill=True, fillColor=color_map.get(str(r[truck_col]), "#64748B"), fill_opacity=0.8, popup=folium.Popup(make_popup(r, False), max_width=250)).add_to(mb)
             components.html(mb.get_root().render(), height=650)
@@ -1448,7 +1455,7 @@ with tab2:
             st.markdown("<div style='text-align:center; font-weight:700; color:#024D7B; margin-bottom:6px;'>✨ หลังปรับ (Hub Routing)</div>", unsafe_allow_html=True)
             ma = folium.Map(location=[center_lat, center_lon], zoom_start=12, tiles="OpenStreetMap")
             if depot_lat != 0 and depot_lon != 0:
-                folium.Marker([depot_lat, depot_lon], popup=f"<b>📌 {selected_depot}</b>", icon=folium.Icon(color='red', icon='home', prefix='fa')).add_to(ma)
+                folium.Marker([depot_lat, depot_lon], popup=f"<b>📌 Hub: {depot_label_text}</b>", icon=folium.Icon(color='red', icon='home', prefix='fa')).add_to(ma)
             for _, r in df_a.iterrows():
                 folium.CircleMarker([r["_lat_clean"], r["_lon_clean"]], radius=5, color=color_map.get(str(r["เบอร์รถใหม่"]), "#64748B"), fill=True, fillColor=color_map.get(str(r["เบอร์รถใหม่"]), "#64748B"), fill_opacity=0.8, popup=folium.Popup(make_popup(r, True), max_width=250)).add_to(ma)
             components.html(ma.get_root().render(), height=650)
@@ -1456,7 +1463,7 @@ with tab2:
         st.info("💡 กรุณากดปุ่ม '🚀 ประมวลผลจัดสายส่งใหม่' ที่เมนูด้านซ้ายเพื่อแสดงแผนที่")
 
 with tab3:
-    st.markdown("### 📅 ตารางวิเคราะห์โหลดรายวัน & รายรายละเอียดการโยกย้าย")
+    st.markdown("### 📅 ตารางวิเคราะห์โหลดรายวัน & รายละเอียดการโยกย้าย")
     if 'result' in st.session_state:
         res: ZoningResult = st.session_state['result']
         rdf = res.result_df

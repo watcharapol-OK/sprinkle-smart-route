@@ -1,6 +1,6 @@
 # =====================================================================================
-#  SMART ROUTE REBALANCER — MULTI-DEPOT ENTERPRISE EDITION v5.3
-#  Corrected Daily-to-Monthly Volume Scaling + Multi-Depot Multi-Select Architecture
+#  SMART ROUTE REBALANCER — ENTERPRISE GATED STEP-BY-STEP EDITION v6.1
+#  Forced Order: 1. Load Sheet -> 2. Select Depot First -> 3. Column Mapping
 # =====================================================================================
 from __future__ import annotations
 
@@ -189,41 +189,33 @@ class ZoningResult:
     infos: List[str] = field(default_factory=list)
 
 # =====================================================================================
-#  SECTION 4 — FLEET DIAGNOSTIC (DAILY-TO-MONTHLY VOLUME SCALING)
+#  SECTION 4 — FLEET DIAGNOSTIC
 # =====================================================================================
 def diagnose_fleet(df: pd.DataFrame, cfg: ZoningConfig) -> pd.DataFrame:
     output_rows = []
     if df.empty:
         return pd.DataFrame()
-    
     for truck, group in df.groupby(cfg.truck_col, dropna=False):
         truck_id = str(truck).strip()
         if truck_id.lower() in NO_TRUCK_TOKENS:
             continue
-        
         daily_vol = np.zeros(WORKING_DAYS, dtype=float)
         daily_stops = np.zeros(WORKING_DAYS, dtype=float)
         total_monthly_vol = 0.0
-        
         for _, row in group.iterrows():
             days, _ = parse_days_from_string(row.get(cfg.day_col))
             if not days:
                 days = list(range(WORKING_DAYS))
-            
-            # ยอดในชีตคือค่าเฉลี่ยต่อวัน -> แปลงเป็นยอดต่อเดือน (คูณ 4.333 สัปดาห์)
             vol_daily_input = float(pd.to_numeric(row.get(cfg.vol_col), errors="coerce") or 0.0)
             cust_monthly_vol = vol_daily_input * WEEKS_PER_MONTH
             total_monthly_vol += cust_monthly_vol
-            
             vol_per_delivery_day = vol_daily_input / max(1, len(days))
             for d in days:
                 if 0 <= d < WORKING_DAYS:
                     daily_vol[d] += vol_per_delivery_day
                     daily_stops[d] += 1
-                    
         peak_v = float(daily_vol.max())
         peak_s = int(round(float(daily_stops.max())))
-        
         if peak_v > cfg.daily_control_cap:
             status = "🔴 เกินเพดาน"
         elif peak_v >= OPTIMAL_MIN:
@@ -232,7 +224,6 @@ def diagnose_fleet(df: pd.DataFrame, cfg: ZoningConfig) -> pd.DataFrame:
             status = "🟡 ควรเลี่ยง"
         else:
             status = "⚪ เบาเกิน"
-            
         output_rows.append({
             "เบอร์รถ": truck_id,
             "จำนวนลูกค้า": int(len(group)),
@@ -243,16 +234,16 @@ def diagnose_fleet(df: pd.DataFrame, cfg: ZoningConfig) -> pd.DataFrame:
             "ส่วนเกิน/วัน": int(round(max(0.0, peak_v - cfg.daily_control_cap))),
             "สถานะ": status,
         })
-        
     out_df = pd.DataFrame(output_rows)
     return out_df.sort_values("โหลดสูงสุด/วัน", ascending=False).reset_index(drop=True) if not out_df.empty else out_df
 
 # =====================================================================================
-#  SECTION 5 — UI & EXECUTION
+#  SECTION 5 — UI & GATED STEP-BY-STEP EXECUTION
 # =====================================================================================
-st.title("🚛 Smart Route Rebalancer — Enterprise")
-st.markdown("<div style='color:#64748B; font-weight:600; margin-bottom:1rem;'>ระบบวิเคราะห์และตัดสายส่งน้ำอัตโนมัติ (Multi-Depot Multi-Select Hub Architecture)</div>", unsafe_allow_html=True)
+st.title("🚛 Smart Route Rebalancer — Enterprise v6.1")
+st.markdown("<div style='color:#64748B; font-weight:600; margin-bottom:1rem;'>ระบบวิเคราะห์และตัดสายส่งน้ำอัตโนมัติ (Step-by-Step Enterprise Edition)</div>", unsafe_allow_html=True)
 
+# --- STEP 1: LOAD DATA ---
 st.sidebar.markdown("### 📁 1. นำเข้าข้อมูลบริษัท")
 sheet_url = st.sidebar.text_input("🔗 ลิงก์ Google Sheets:", value="https://docs.google.com/spreadsheets/d/1PqliJwDoK27SCAj2nlcwkeHmDOdKEQqVcpUaRnQaTWc/edit?usp=sharing", placeholder="วางลิงก์ที่นี่...")
 raw_gid = st.sidebar.text_input("แท็บชีต (GID):", value="0")
@@ -288,15 +279,13 @@ if sheet_url:
         st.sidebar.error(f"❌ {st.session_state['raw_err']}")
 
 if df_raw is None or df_raw.empty:
-    st.info("👈 กรุณาวางลิงก์ Google Sheets ที่แถบเมนูด้านซ้าย เพื่อเริ่มต้นใช้งาน")
+    st.info("👈 กรุณาวางลิงก์ Google Sheets ที่แถบเมนูด้านซ้าย เพื่อเริ่มต้นโหลดข้อมูล")
     st.stop()
 
 df_raw = df_raw.copy()
 cols = df_raw.columns.tolist()
 
-# =====================================================================================
-#  STEP 2: MULTI-DEPOT MULTI-SELECT
-# =====================================================================================
+# --- STEP 2: SELECT DEPOTS FIRST (MANDATORY BEFORE MAPPING) ---
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🏢 2. เลือกคลัง/สาขา (เลือกได้หลายสาขา)")
 
@@ -313,9 +302,7 @@ if depot_col_guess and depot_col_guess in df_raw.columns:
 else:
     df = df_raw.copy()
 
-# =====================================================================================
-#  STEP 3: COLUMN MAPPING UI
-# =====================================================================================
+# --- STEP 3: COLUMN MAPPING UI ---
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🧭 3. ยืนยันคอลัมน์ข้อมูลจากชีต")
 def sel(label, keys, allow_none=False):
@@ -325,7 +312,7 @@ def sel(label, keys, allow_none=False):
         i = (cols.index(g) + 1) if g in cols else 0
         v = st.sidebar.selectbox(label, opts, index=i, on_change=reset_results)
         return None if v == "-- ไม่มี --" else v
-    i = cols.index(g) if g in cols else 0
+    i = cols.index(g) if cols and g in cols else 0
     return st.sidebar.selectbox(label, cols, index=i, on_change=reset_results)
 
 gps_col = sel("คอลัมน์พิกัด GPS:", ['พิกัด', 'gps', 'lat'])
@@ -350,7 +337,6 @@ coords_extracted = df[gps_col].apply(split_lat_lon)
 df["_lat_clean"] = [c[0] for c in coords_extracted]
 df["_lon_clean"] = [c[1] for c in coords_extracted]
 
-# แปลงยอดรายวันในชีตให้เป็นยอดสะสมต่อเดือนเพื่อใช้ในโมเดล Hub Routing
 df["_vol_daily"] = pd.to_numeric(df[vol_col], errors='coerce').fillna(0).astype(float)
 df[vol_col] = df["_vol_daily"] * WEEKS_PER_MONTH
 df[truck_col] = df[truck_col].astype(str).str.strip()

@@ -1,7 +1,6 @@
 # =====================================================================================
-#  SMART ROUTE REBALANCER — STRICT GATED ENTERPRISE EDITION v8.1
-#  Absolute Gate: Renders ONLY Sheet Load & Depot Selector until branches are chosen.
-#  Hub Selector: Choose hub center after depot selection.
+#  SMART ROUTE REBALANCER — STRICT GATED ENTERPRISE EDITION v8.2
+#  Fix: truck_pcts session_state initialization bug
 # =====================================================================================
 from __future__ import annotations
 
@@ -38,6 +37,8 @@ if 'truck_pcts' not in st.session_state:
     st.session_state.truck_pcts = {}
 if 'raw_key' not in st.session_state:
     st.session_state.raw_key = ""
+if 'slider_fp' not in st.session_state:
+    st.session_state.slider_fp = ""
 
 WORKING_DAYS = 6
 WEEKS_PER_MONTH = 4.333
@@ -63,9 +64,6 @@ DAY_TOKENS: List[Tuple[str, int]] = [
 ]
 ALL_DAYS_TOKENS = ("ทุกวัน", "จ-ส", "จันทร์-เสาร์", "จ.-ส.", "ทุกวันทำการ")
 
-# ------------------------------------------------------------------------------
-# CSS (เนื่องจากโค้ดเดิมอ้างอิง class ที่ไม่ได้กำหนด)
-# ------------------------------------------------------------------------------
 st.markdown(
     """
     <style>
@@ -178,10 +176,6 @@ def split_lat_lon(val):
 
 
 def extract_volume_series(series: pd.Series) -> pd.Series:
-    """
-    แยกตัวเลขยอดส่งจากข้อความ เช่น 'avg=4;วัน=ศ.' หรือค่าตัวเลขธรรมดา
-    คืนค่าเป็น Series ของ float (ถัง/วัน)
-    """
     s = series.astype(str).str.strip()
     avg_extract = s.str.extract(r'avg\s*=\s*(\d+(?:\.\d+)?)', flags=re.IGNORECASE)[0]
     avg_num = pd.to_numeric(avg_extract, errors='coerce')
@@ -311,7 +305,7 @@ def sel(label, keys, cols, allow_none=False):
 
 
 # =====================================================================================
-#  ↓↓↓ ฟังก์ชัน CORE หลัก (ถ้าคุณมีโค้ดจริง ให้แทนที่ stubs ด้านล่าง) ↓↓↓
+#  CORE FUNCTIONS (stubs - replace with your real implementations if needed)
 # =====================================================================================
 def compute_default_targets(
     vol_by_truck_monthly: Dict[str, float],
@@ -320,13 +314,7 @@ def compute_default_targets(
     new_trucks: List[str],
     cap_units: float
 ) -> Tuple[Dict[str, float], dict]:
-    """
-    คำนวณเป้าหมายยอดรายเดือน (ถัง) ให้แต่ละคัน
-    คืนค่า (targets_dict, extra_info)
-    """
-    raise NotImplementedError(
-        "กรุณา implement หรือ import ฟังก์ชัน compute_default_targets จากโค้ดเดิมของคุณ"
-    )
+    raise NotImplementedError("Implement compute_default_targets")
 
 
 def run_multi_donor_zoning(
@@ -339,27 +327,17 @@ def run_multi_donor_zoning(
     manual_vips: List[str],
     exclude_trucks: List[str]
 ) -> ZoningResult:
-    """
-    ประมวลผลจัดกลุ่มลูกค้าใหม่ตามเป้าหมาย
-    """
-    raise NotImplementedError(
-        "กรุณา implement หรือ import ฟังก์ชัน run_multi_donor_zoning จากโค้ดเดิมของคุณ"
-    )
+    raise NotImplementedError("Implement run_multi_donor_zoning")
 
 
 def render_enterprise_metric(label: str, value: str, delta: Optional[str] = None, status: str = "normal"):
-    """
-    วาดการ์ดตัวชี้วัดบน Dashboard
-    """
-    raise NotImplementedError(
-        "กรุณา implement หรือ import ฟังก์ชัน render_enterprise_metric จากโค้ดเดิมของคุณ"
-    )
+    raise NotImplementedError("Implement render_enterprise_metric")
 
 
 # =====================================================================================
-#  UI & STRICT GATED EXECUTION (v8.1)
+#  UI
 # =====================================================================================
-st.title("🚛 Smart Route Rebalancer — Enterprise v8.1")
+st.title("🚛 Smart Route Rebalancer — Enterprise v8.2")
 st.markdown(
     "<div style='color:#64748B; font-weight:600; margin-bottom:1rem;'>"
     "ระบบวิเคราะห์และตัดสายส่งน้ำอัตโนมัติ (Strict Gated Step-by-Step)"
@@ -367,7 +345,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# --- STAGE 1: LOAD SHEET DATA ---
+# --- STAGE 1 ---
 st.sidebar.markdown("### 📁 1. นำเข้าข้อมูลบริษัท")
 sheet_url = st.sidebar.text_input(
     "🔗 ลิงก์ Google Sheets:",
@@ -417,7 +395,7 @@ if df_raw is None or df_raw.empty:
 df_raw = df_raw.copy()
 cols = df_raw.columns.tolist()
 
-# --- STAGE 2: SELECT GPS COLUMN FIRST (required for hub calculation) ---
+# --- STAGE 2: GPS ---
 st.sidebar.markdown("### 📍 2. เลือกคอลัมน์พิกัด GPS")
 gps_col = sel("คอลัมน์พิกัด GPS:", ['พิกัด GPS', 'พิกัด', 'gps', 'lat'], cols=cols)
 
@@ -425,7 +403,7 @@ coords = df_raw[gps_col].apply(split_lat_lon)
 df_raw["_lat_clean"] = [c[0] for c in coords]
 df_raw["_lon_clean"] = [c[1] for c in coords]
 
-# --- STAGE 3: SELECT DEPOT / BRANCH (ABSOLUTE GATE) ---
+# --- STAGE 3: DEPOT GATE ---
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🏢 3. เลือกคลัง/สาขา (เลือกได้หลายสาขา)")
 
@@ -452,17 +430,13 @@ else:
     all_depots = []
 
 if not selected_depots:
-    st.warning(
-        "🛑 กรุณาเลือก 'คลัง/สาขา' ที่แถบเมนูด้านซ้ายอย่างน้อย 1 สาขา "
-        "เพื่อปลดล็อกและเริ่มทำการคำนวณ"
-    )
+    st.warning("🛑 กรุณาเลือก 'คลัง/สาขา' ที่แถบเมนูด้านซ้ายอย่างน้อย 1 สาขา เพื่อปลดล็อกและเริ่มทำการคำนวณ")
     st.stop()
 
-# กรองข้อมูลเฉพาะสาขาที่เลือก
 df = df_raw[df_raw[depot_col_guess].astype(str).str.strip().isin(selected_depots)].reset_index(drop=True)
 depot_label_text = ", ".join(selected_depots)
 
-# --- STAGE 4: SELECT PRIMARY HUB ---
+# --- STAGE 4: HUB ---
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🎯 4. เลือกศูนย์กลาง Hub หลัก")
 
@@ -518,7 +492,7 @@ st.sidebar.markdown(
     unsafe_allow_html=True
 )
 
-# --- STAGE 5: COLUMN MAPPING FROM SELECTED BRANCHES ---
+# --- STAGE 5: COLUMN MAPPING ---
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🧭 5. ยืนยันคอลัมน์ข้อมูลจากสาขาที่เลือก")
 
@@ -529,7 +503,6 @@ id_col = sel("คอลัมน์รหัสสมาชิก:", ['รหั
 vip_col = sel("คอลัมน์สถานะ (VIP/ปกติ):", ['สถานะ', 'vip'], cols=cols, allow_none=True)
 name_col = sel("คอลัมน์ชื่อลูกค้า:", ['ชื่อ', 'name'], cols=cols, allow_none=True)
 
-# แยกยอดรายวันและรายเดือน ไม่ overwrite คอลัมน์ต้นฉบับ
 df["_vol_daily"] = extract_volume_series(df[vol_col])
 df["_vol_monthly"] = df["_vol_daily"] * WEEKS_PER_MONTH
 
@@ -537,12 +510,11 @@ df[truck_col] = df[truck_col].astype(str).str.strip()
 df[id_col] = df[id_col].astype(str).str.strip()
 df['VIP_Status'] = df[vip_col].astype(str).str.strip() if vip_col else 'ปกติ'
 
-# กรองเฉพาะแถวที่มีพิกัดและเบอร์รถถูกต้อง
 df = df.dropna(subset=["_lat_clean", "_lon_clean"]).reset_index(drop=True)
 df = df[~df[truck_col].str.lower().isin(NO_TRUCK_TOKENS)].reset_index(drop=True)
 available_trucks = clean_truck_ids(df[truck_col].unique())
 
-# --- STAGE 6: COMPANY CONTROL CAPS ---
+# --- STAGE 6: CAPS ---
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 📏 6. เพดานควบคุมของบริษัท")
 monthly_cap = st.sidebar.number_input(
@@ -559,7 +531,6 @@ daily_cap = st.sidebar.number_input(
 )
 cap_units = daily_cap * DAYS_PER_MONTH
 
-# Config ใช้ยอดรายวันในการคำนวณ zoning
 base_cfg = ZoningConfig(
     lat_col="_lat_clean",
     lon_col="_lon_clean",
@@ -577,7 +548,7 @@ base_cfg = ZoningConfig(
 diag = diagnose_fleet(df, base_cfg)
 overloaded = diag.loc[diag['สถานะ'] == '🔴 เกินเพดาน', 'เบอร์รถ'].tolist() if not diag.empty else []
 
-# --- STAGE 7: LOCK TRUCKS ---
+# --- STAGE 7: LOCK ---
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🚫 7. ล็อกรถที่ไม่ต้องคำนวณ")
 exclude_trucks = st.sidebar.multiselect(
@@ -588,7 +559,7 @@ exclude_trucks = st.sidebar.multiselect(
 )
 processable_trucks = [t for t in available_trucks if t not in exclude_trucks]
 
-# --- STAGE 8: DONORS & NEW TRUCKS ---
+# --- STAGE 8: DONORS ---
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🚚 8. เลือกรถต้นทาง (Donors)")
 dissolve_trucks = st.sidebar.multiselect(
@@ -617,12 +588,11 @@ new_trucks = sorted({
     if t.strip() and t.strip() not in available_trucks
 })
 
-# ยอดรวมรายเดือนต่อคัน ใช้คำนวณ % เป้าหมาย
 vol_by_truck_monthly = df.groupby(truck_col)["_vol_monthly"].sum().to_dict()
 kept_trucks = [t for t in processable_trucks if t not in dissolve_trucks]
 active_trucks = kept_trucks + new_trucks
 
-# --- STAGE 9: TARGETS PER TRUCK (%) ---
+# --- STAGE 9: TARGETS ---
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🎛️ 9. เป้าหมายรายคัน (%)")
 depot_fp_key = ",".join(sorted(selected_depots))
@@ -637,23 +607,31 @@ if st.sidebar.button("🔄 คำนวณเป้าหมายอัตโ�
     st.session_state.pop('slider_fp', None)
     reset_results()
 
+# ป้องกัน truck_pcts หาย
+if 'truck_pcts' not in st.session_state or st.session_state.truck_pcts is None:
+    st.session_state.truck_pcts = {}
+
 if st.session_state.get('slider_fp') != fingerprint:
     for k in [k for k in list(st.session_state.keys()) if k.startswith('slider_') or k.startswith('lock_')]:
         del st.session_state[k]
-    tgt_units, _ = compute_default_targets(
-        vol_by_truck_monthly, dissolve_trucks, kept_trucks, new_trucks, cap_units
-    )
-    st.session_state.truck_pcts = {
-        t: float(round(max(0.0, min(200.0, tgt_units.get(t, 0.0) / monthly_cap * 100)), 1))
-        for t in active_trucks
-    }
-    for t in active_trucks:
-        st.session_state[f"slider_{t}"] = st.session_state.truck_pcts[t]
+    if active_trucks:
+        tgt_units, _ = compute_default_targets(
+            vol_by_truck_monthly, dissolve_trucks, kept_trucks, new_trucks, cap_units
+        )
+        st.session_state.truck_pcts = {
+            t: float(round(max(0.0, min(200.0, tgt_units.get(t, 0.0) / monthly_cap * 100)), 1))
+            for t in active_trucks
+        }
+        for t in active_trucks:
+            st.session_state[f"slider_{t}"] = st.session_state.truck_pcts[t]
+    else:
+        st.session_state.truck_pcts = {}
     st.session_state['slider_fp'] = fingerprint
 
 
 def on_slider_change(changed: str):
-    if 'truck_pcts' not in st.session_state:
+    # ป้องกัน truck_pcts หายตอน callback
+    if 'truck_pcts' not in st.session_state or st.session_state.truck_pcts is None:
         st.session_state.truck_pcts = {}
     new_val = max(0.0, min(200.0, st.session_state.get(f"slider_{changed}", 0.0)))
     old = st.session_state.truck_pcts.get(changed, new_val)
@@ -672,25 +650,32 @@ def on_slider_change(changed: str):
 
 
 target_pcts: Dict[str, float] = {}
-for t in active_trucks:
-    c1, c2 = st.sidebar.columns([3, 1.2])
-    with c2:
-        st.checkbox("🔒", key=f"lock_{t}", on_change=reset_results)
-    with c1:
-        default_v = float(st.session_state.truck_pcts.get(t, 100.0))
-        v = st.slider(
-            f"{'🆕 ' if t in new_trucks else ''}รถ {t} (%)",
-            0.0, 200.0,
-            value=default_v,
-            step=0.1,
-            key=f"slider_{t}",
-            on_change=on_slider_change,
-            args=(t,)
-        )
-        target_pcts[t] = v
-        st.session_state.truck_pcts[t] = v
+if active_trucks:
+    for t in active_trucks:
+        # เตรียมค่าเริ่มต้นก่อนสร้าง slider
+        if f"slider_{t}" not in st.session_state:
+            st.session_state[f"slider_{t}"] = float(st.session_state.truck_pcts.get(t, 100.0))
+        if t not in st.session_state.truck_pcts:
+            st.session_state.truck_pcts[t] = st.session_state[f"slider_{t}"]
 
-# --- STAGE 10: VIP & RULES ---
+        c1, c2 = st.sidebar.columns([3, 1.2])
+        with c2:
+            st.checkbox("🔒", key=f"lock_{t}", on_change=reset_results)
+        with c1:
+            default_v = float(st.session_state.truck_pcts.get(t, st.session_state.get(f"slider_{t}", 100.0)))
+            v = st.slider(
+                f"{'🆕 ' if t in new_trucks else ''}รถ {t} (%)",
+                0.0, 200.0,
+                value=default_v,
+                step=0.1,
+                key=f"slider_{t}",
+                on_change=on_slider_change,
+                args=(t,)
+            )
+            target_pcts[t] = v
+            st.session_state.truck_pcts[t] = v
+
+# --- STAGE 10: RULES ---
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🔒 10. ล็อก Key Account & กฎ")
 manual_vips = st.sidebar.multiselect(
@@ -736,7 +721,7 @@ if st.sidebar.button("🚀 ประมวลผลจัดสายส่ง�
         ph.empty()
 
 # =====================================================================================
-#  DASHBOARD TABS UI
+#  DASHBOARD TABS
 # =====================================================================================
 tab1, tab2, tab3 = st.tabs([
     "📊 1. ภาพรวมและวินิจฉัย (Dashboard)",

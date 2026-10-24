@@ -607,9 +607,11 @@ if st.sidebar.button("🔄 คำนวณเป้าหมายอัตโ�
     st.session_state.pop('slider_fp', None)
     reset_results()
 
-# ป้องกัน truck_pcts หาย
+# ป้องกัน session state หาย
 if 'truck_pcts' not in st.session_state or st.session_state.truck_pcts is None:
     st.session_state.truck_pcts = {}
+if 'slider_fp' not in st.session_state:
+    st.session_state.slider_fp = ""
 
 if st.session_state.get('slider_fp') != fingerprint:
     for k in [k for k in list(st.session_state.keys()) if k.startswith('slider_') or k.startswith('lock_')]:
@@ -628,53 +630,62 @@ if st.session_state.get('slider_fp') != fingerprint:
         st.session_state.truck_pcts = {}
     st.session_state['slider_fp'] = fingerprint
 
+# สร้าง sliders โดยไม่ใช้ callback
+target_pcts: Dict[str, float] = {}
+for t in active_trucks:
+    if t not in st.session_state.truck_pcts:
+        st.session_state.truck_pcts[t] = 100.0
+    if f"slider_{t}" not in st.session_state:
+        st.session_state[f"slider_{t}"] = st.session_state.truck_pcts[t]
 
-def on_slider_change(changed: str):
-    # ป้องกัน truck_pcts หายตอน callback
-    if 'truck_pcts' not in st.session_state or st.session_state.truck_pcts is None:
-        st.session_state.truck_pcts = {}
-    new_val = max(0.0, min(200.0, st.session_state.get(f"slider_{changed}", 0.0)))
-    old = st.session_state.truck_pcts.get(changed, new_val)
-    diff = new_val - old
-    if abs(diff) < 0.01:
-        return
-    free = [t for t in active_trucks if t != changed and not st.session_state.get(f"lock_{t}", False)]
+    c1, c2 = st.sidebar.columns([3, 1.2])
+    with c2:
+        st.checkbox("🔒", key=f"lock_{t}", on_change=reset_results)
+    with c1:
+        default_v = float(st.session_state.truck_pcts.get(t, 100.0))
+        st.slider(
+            f"{'🆕 ' if t in new_trucks else ''}รถ {t} (%)",
+            0.0, 200.0,
+            value=default_v,
+            step=0.1,
+            key=f"slider_{t}"
+        )
+
+# อ่านค่า slider ปัจจุบัน
+current_values = {
+    t: float(st.session_state.get(f"slider_{t}", st.session_state.truck_pcts.get(t, 100.0)))
+    for t in active_trucks
+}
+
+# ตรวจจับการเปลี่ยนแปลงและ rebalance แบบไม่ใช้ callback
+changed_truck = None
+for t in active_trucks:
+    if abs(current_values[t] - st.session_state.truck_pcts.get(t, current_values[t])) > 0.01:
+        changed_truck = t
+        break
+
+if changed_truck:
+    new_val = current_values[changed_truck]
+    old_val = st.session_state.truck_pcts.get(changed_truck, new_val)
+    diff = new_val - old_val
+    free = [t for t in active_trucks if t != changed_truck and not st.session_state.get(f"lock_{t}", False)]
     if free:
         share = diff / len(free)
         for t in free:
-            v = round(max(0.0, min(200.0, st.session_state.truck_pcts.get(t, 0.0) - share)), 1)
-            st.session_state.truck_pcts[t] = v
-            st.session_state[f"slider_{t}"] = v
-    st.session_state.truck_pcts[changed] = round(new_val, 1)
-    reset_results()
-
-
-target_pcts: Dict[str, float] = {}
-if active_trucks:
+            current_values[t] = round(max(0.0, min(200.0, current_values[t] - share)), 1)
     for t in active_trucks:
-        # เตรียมค่าเริ่มต้นก่อนสร้าง slider
-        if f"slider_{t}" not in st.session_state:
-            st.session_state[f"slider_{t}"] = float(st.session_state.truck_pcts.get(t, 100.0))
-        if t not in st.session_state.truck_pcts:
-            st.session_state.truck_pcts[t] = st.session_state[f"slider_{t}"]
-
-        c1, c2 = st.sidebar.columns([3, 1.2])
-        with c2:
-            st.checkbox("🔒", key=f"lock_{t}", on_change=reset_results)
-        with c1:
-            default_v = float(st.session_state.truck_pcts.get(t, st.session_state.get(f"slider_{t}", 100.0)))
-            v = st.slider(
-                f"{'🆕 ' if t in new_trucks else ''}รถ {t} (%)",
-                0.0, 200.0,
-                value=default_v,
-                step=0.1,
-                key=f"slider_{t}",
-                on_change=on_slider_change,
-                args=(t,)
-            )
-            target_pcts[t] = v
-            st.session_state.truck_pcts[t] = v
-
+        st.session_state.truck_pcts[t] = current_values[t]
+        st.session_state[f"slider_{t}"] = current_values[t]
+    reset_results()
+    try:
+        st.rerun()
+    except Exception:
+        st.experimental_rerun()
+else:
+    for t in active_trucks:
+        target_pcts[t] = current_values[t]
+        st.session_state.truck_pcts[t] = current_values[t]
+        
 # --- STAGE 10: RULES ---
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🔒 10. ล็อก Key Account & กฎ")

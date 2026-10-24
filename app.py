@@ -1,6 +1,6 @@
 # =====================================================================================
-#  SMART ROUTE REBALANCER — MULTI-DEPOT ENTERPRISE EDITION v5.1
-#  Forced Sidebar Depot Selector Multi-Select + Correct Flow Architecture
+#  SMART ROUTE REBALANCER — MULTI-DEPOT ENTERPRISE EDITION v5.3
+#  Corrected Daily-to-Monthly Volume Scaling + Multi-Depot Multi-Select Architecture
 # =====================================================================================
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ def parse_days_from_string(val_str) -> Tuple[List[int], str]:
     raw = "" if val_str is None else str(val_str)
     val = raw.strip().lower()
     if val in NO_TRUCK_TOKENS:
-        return [], "empty"
+        return list(range(WORKING_DAYS)), "empty"
     compact = re.sub(r"\s+", "", val)
     if any(token in compact for token in ALL_DAYS_TOKENS):
         return list(range(WORKING_DAYS)), "ok"
@@ -90,24 +90,24 @@ def parse_days_from_string(val_str) -> Tuple[List[int], str]:
             if name in token:
                 days.add(day_index)
                 break
-    return (sorted(days), "ok") if days else ([], "unparsed")
+    return (sorted(days), "ok") if days else (list(range(WORKING_DAYS)), "unparsed")
 
 def format_days_to_string(days_list: Sequence[int]) -> str:
     if not days_list:
-        return "ไม่ระบุ"
+        return "จ-ส"
     days = sorted({int(d) for d in days_list if 0 <= int(d) < WORKING_DAYS})
     if not days:
-        return "ไม่ระบุ"
+        return "จ-ส"
     if len(days) == WORKING_DAYS:
         return "จ-ส"
     return ", ".join(DAY_NAMES[d] for d in days)
 
 def format_days_short(days_list: Sequence[int]) -> str:
     if not days_list:
-        return "-"
+        return "จ-ส"
     days = sorted({int(d) for d in days_list if 0 <= int(d) < WORKING_DAYS})
     if not days:
-        return "-"
+        return "จ-ส"
     if len(days) == WORKING_DAYS:
         return "จ-ส"
     return "".join(DAY_SHORT[d] for d in days)
@@ -123,63 +123,6 @@ def project_xy(lat, lon, lat0: Optional[float] = None) -> Tuple[np.ndarray, np.n
     x = np.radians(lon_arr) * EARTH_RADIUS_M * scale
     y = np.radians(lat_arr) * EARTH_RADIUS_M
     return x, y, lat0
-
-def knn_indices(xy: np.ndarray, k: int) -> np.ndarray:
-    xy = np.asarray(xy, dtype=float)
-    n = len(xy)
-    k = int(min(max(0, k), max(0, n - 1)))
-    if k <= 0:
-        return np.zeros((n, 0), dtype=int)
-    if HAS_SCIPY:
-        tree = cKDTree(xy)
-        _, indices = tree.query(xy, k=k + 1, workers=-1)
-        if k == 1:
-            indices = np.asarray(indices).reshape(n, 2)
-        return np.asarray(indices[:, 1:], dtype=int)
-    output = np.zeros((n, k), dtype=int)
-    chunk_size = 512
-    for start in range(0, n, chunk_size):
-        end = min(n, start + chunk_size)
-        distances = ((xy[start:end, None, :] - xy[None, :, :]) ** 2).sum(axis=2)
-        local_rows = np.arange(end - start)
-        global_rows = np.arange(start, end)
-        distances[local_rows, global_rows] = np.inf
-        nearest = np.argpartition(distances, kth=k - 1, axis=1)[:, :k]
-        nearest_distances = np.take_along_axis(distances, nearest, axis=1)
-        order = np.argsort(nearest_distances, axis=1)
-        output[start:end] = np.take_along_axis(nearest, order, axis=1)
-    return output
-
-def kmeans_seeds(xy: np.ndarray, weights: np.ndarray, k: int, iters: int = 20, seed: int = 42) -> np.ndarray:
-    xy = np.asarray(xy, dtype=float)
-    weights = np.asarray(weights, dtype=float)
-    n = len(xy)
-    if n == 0:
-        return np.zeros((0, 2), dtype=float)
-    k = max(1, min(int(k), n))
-    rng = np.random.default_rng(seed)
-    valid_weights = np.where(np.isfinite(weights) & (weights > 0), weights, 1e-9)
-    first_index = rng.choice(n, p=valid_weights / valid_weights.sum())
-    centers = [xy[first_index]]
-    for _ in range(k - 1):
-        cur_centers = np.asarray(centers, dtype=float)
-        dist_sq = np.min(((xy[:, None, :] - cur_centers[None, :, :]) ** 2).sum(axis=2), axis=1)
-        probs = dist_sq * valid_weights
-        probs = (probs / probs.sum()) if probs.sum() > 0 else np.full(n, 1.0 / n)
-        centers.append(xy[rng.choice(n, p=probs)])
-    centers_arr = np.asarray(centers, dtype=float)
-    for _ in range(max(1, int(iters))):
-        dist_sq = ((xy[:, None, :] - centers_arr[None, :, :]) ** 2).sum(axis=2)
-        labels = dist_sq.argmin(axis=1)
-        new_centers = centers_arr.copy()
-        for c_idx in range(k):
-            mask = labels == c_idx
-            if mask.any():
-                new_centers[c_idx] = np.average(xy[mask], axis=0, weights=valid_weights[mask])
-        if np.allclose(new_centers, centers_arr, atol=1e-3, rtol=0.0):
-            break
-        centers_arr = new_centers
-    return centers_arr
 
 def clean_truck_ids(values: Sequence) -> List[str]:
     output = []
@@ -246,68 +189,41 @@ class ZoningResult:
     infos: List[str] = field(default_factory=list)
 
 # =====================================================================================
-#  SECTION 4 — CAPACITY PLANNING & FLEET DIAGNOSTIC
+#  SECTION 4 — FLEET DIAGNOSTIC (DAILY-TO-MONTHLY VOLUME SCALING)
 # =====================================================================================
-def compute_default_targets(vol_by_truck: Dict[str, float], dissolve: Sequence[str], keep: Sequence[str], new_trucks: Sequence[str], cap_units: float) -> Tuple[Dict[str, float], float]:
-    cap_limit = max(0.0, float(cap_units))
-    pool = float(sum(float(vol_by_truck.get(t, 0.0)) for t in dissolve))
-    targets: Dict[str, float] = {}
-    for t in keep:
-        vol = max(0.0, float(vol_by_truck.get(t, 0.0)))
-        if vol > cap_limit:
-            pool += vol - cap_limit
-            targets[t] = cap_limit
-        else:
-            targets[t] = vol
-    for t in new_trucks:
-        targets[t] = 0.0
-    for t in new_trucks:
-        if pool <= 1e-6:
-            break
-        alloc = min(cap_limit - targets.get(t, 0.0), pool)
-        targets[t] = targets.get(t, 0.0) + alloc
-        pool -= alloc
-    for _ in range(60):
-        if pool <= 1e-6:
-            break
-        headroom = {t: max(0.0, cap_limit - tgt) for t, tgt in targets.items() if cap_limit - tgt > 1e-6}
-        if not headroom:
-            break
-        total_head = sum(headroom.values())
-        if total_head <= 1e-9:
-            break
-        ratio = min(1.0, pool / total_head)
-        for t, avail in headroom.items():
-            alloc = min(pool, avail * ratio)
-            targets[t] += alloc
-            pool -= alloc
-            if pool <= 1e-6:
-                pool = 0.0
-                break
-    return targets, max(0.0, pool)
-
 def diagnose_fleet(df: pd.DataFrame, cfg: ZoningConfig) -> pd.DataFrame:
     output_rows = []
     if df.empty:
         return pd.DataFrame()
+    
     for truck, group in df.groupby(cfg.truck_col, dropna=False):
         truck_id = str(truck).strip()
         if truck_id.lower() in NO_TRUCK_TOKENS:
             continue
+        
         daily_vol = np.zeros(WORKING_DAYS, dtype=float)
         daily_stops = np.zeros(WORKING_DAYS, dtype=float)
+        total_monthly_vol = 0.0
+        
         for _, row in group.iterrows():
             days, _ = parse_days_from_string(row.get(cfg.day_col))
             if not days:
                 days = list(range(WORKING_DAYS))
-            vol_m = float(pd.to_numeric(row.get(cfg.vol_col), errors="coerce") or 0.0)
-            vol_per_day = vol_m / max(1, len(days)) / WEEKS_PER_MONTH
+            
+            # ยอดในชีตคือค่าเฉลี่ยต่อวัน -> แปลงเป็นยอดต่อเดือน (คูณ 4.333 สัปดาห์)
+            vol_daily_input = float(pd.to_numeric(row.get(cfg.vol_col), errors="coerce") or 0.0)
+            cust_monthly_vol = vol_daily_input * WEEKS_PER_MONTH
+            total_monthly_vol += cust_monthly_vol
+            
+            vol_per_delivery_day = vol_daily_input / max(1, len(days))
             for d in days:
-                daily_vol[d] += vol_per_day
-                daily_stops[d] += 1
-        tot_vol = float(pd.to_numeric(group[cfg.vol_col], errors="coerce").fillna(0).sum())
+                if 0 <= d < WORKING_DAYS:
+                    daily_vol[d] += vol_per_delivery_day
+                    daily_stops[d] += 1
+                    
         peak_v = float(daily_vol.max())
         peak_s = int(round(float(daily_stops.max())))
+        
         if peak_v > cfg.daily_control_cap:
             status = "🔴 เกินเพดาน"
         elif peak_v >= OPTIMAL_MIN:
@@ -316,833 +232,23 @@ def diagnose_fleet(df: pd.DataFrame, cfg: ZoningConfig) -> pd.DataFrame:
             status = "🟡 ควรเลี่ยง"
         else:
             status = "⚪ เบาเกิน"
+            
         output_rows.append({
             "เบอร์รถ": truck_id,
             "จำนวนลูกค้า": int(len(group)),
-            "ยอด/เดือน": int(round(tot_vol)),
-            "ภาระงาน(%)": round(tot_vol / max(1.0, cfg.monthly_capacity) * 100.0, 1),
+            "ยอด/เดือน": int(round(total_monthly_vol)),
+            "ภาระงาน(%)": round(total_monthly_vol / max(1.0, cfg.monthly_capacity) * 100.0, 1),
             "โหลดสูงสุด/วัน": int(round(peak_v)),
             "จุดจอด": peak_s,
             "ส่วนเกิน/วัน": int(round(max(0.0, peak_v - cfg.daily_control_cap))),
             "สถานะ": status,
         })
+        
     out_df = pd.DataFrame(output_rows)
     return out_df.sort_values("โหลดสูงสุด/วัน", ascending=False).reset_index(drop=True) if not out_df.empty else out_df
 
 # =====================================================================================
-#  SECTION 5 — CORE ZONING & SATELLITE POCKET CONSOLIDATION
-# =====================================================================================
-def _tolerance_for(truck: str, targets: Dict[str, float], cfg: ZoningConfig) -> float:
-    if cfg.tol_mode == "target":
-        return max(40.0, (cfg.tol_pct / 100.0) * max(0.0, targets.get(truck, 0.0)))
-    return (cfg.tol_pct / 100.0) * max(0.0, cfg.monthly_capacity)
-
-def build_stops(df: pd.DataFrame, cfg: ZoningConfig) -> pd.DataFrame:
-    stops = (
-        df.groupby("coord_key", dropna=False)
-        .agg(
-            lat=(cfg.lat_col, "first"),
-            lon=(cfg.lon_col, "first"),
-            x=("x", "first"),
-            y=("y", "first"),
-            total_vol=(cfg.vol_col, "sum"),
-            n_cust=(cfg.id_col, "count"),
-            orig_truck=(cfg.truck_col, "first"),
-            has_vip_lock=("is_vip_locked", "any"),
-        )
-        .reset_index()
-    )
-    stops["orig_truck"] = stops["orig_truck"].astype(str).str.strip()
-    stops["total_vol"] = pd.to_numeric(stops["total_vol"], errors="coerce").fillna(0.0).astype(float)
-    return stops
-
-def compute_core_keys(stops: pd.DataFrame, ratio: float, eligible_trucks: Sequence[str], ratio_override: Optional[Dict[str, float]] = None) -> set:
-    core_keys = set()
-    if stops.empty or ratio <= 0:
-        return core_keys
-    ratio_override = ratio_override or {}
-    for truck in eligible_trucks:
-        t_ratio = min(float(ratio), float(ratio_override.get(truck, 100.0)))
-        if t_ratio <= 0:
-            continue
-        group = stops[stops["orig_truck"] == truck].copy()
-        if group.empty:
-            continue
-        weights = np.maximum(group["total_vol"].to_numpy(dtype=float), 1e-9)
-        cx, cy = float(np.average(group["x"], weights=weights)), float(np.average(group["y"], weights=weights))
-        group["_dist_sq"] = (group["x"] - cx) ** 2 + (group["y"] - cy) ** 2
-        group = group.sort_values("_dist_sq", ascending=True)
-        tot = max(1e-6, float(group["total_vol"].sum()))
-        selected = (group["total_vol"].cumsum() / tot) <= (t_ratio / 100.0)
-        if not selected.any() and len(group):
-            selected.iloc[0] = True
-        core_keys.update(group.loc[selected, "coord_key"].tolist())
-    return core_keys
-
-def _assign_capacitated(stops: pd.DataFrame, trucks: List[str], targets: Dict[str, float], tolerance: Dict[str, float], seeds: Dict[str, Tuple[float, float]], max_rounds: int = 80) -> Tuple[np.ndarray, Dict[str, float]]:
-    n_stops, n_trucks = len(stops), len(trucks)
-    if n_stops == 0:
-        return np.asarray([], dtype=int), {t: 0.0 for t in trucks}
-    if n_trucks == 0:
-        return np.full(n_stops, -1, dtype=int), {}
-    coords = stops[["x", "y"]].to_numpy(dtype=float)
-    vols = stops["total_vol"].to_numpy(dtype=float)
-    t_idx = {t: i for i, t in enumerate(trucks)}
-    assigned = np.array([t_idx.get(v, -1) if isinstance(v, str) else -1 for v in stops["assigned_truck"].tolist()], dtype=int)
-    loads = {t: 0.0 for t in trucks}
-    for idx in np.where(assigned >= 0)[0]:
-        loads[trucks[assigned[idx]]] += vols[idx]
-    for _ in range(max(1, int(max_rounds))):
-        el_trucks = [t for t in trucks if loads[t] < targets.get(t, 0.0) - 1e-9]
-        if not el_trucks:
-            break
-        cand_indices = np.where(assigned < 0)[0]
-        if cand_indices.size == 0:
-            break
-        centers = []
-        for t in el_trucks:
-            mask = assigned == t_idx[t]
-            if mask.any():
-                center = np.average(coords[mask], axis=0, weights=np.maximum(vols[mask], 1e-9))
-            else:
-                center = np.asarray(seeds.get(t, (coords[:, 0].mean(), coords[:, 1].mean())), dtype=float)
-            centers.append(center)
-        centers_arr = np.asarray(centers, dtype=float)
-        dist = np.sqrt(((coords[cand_indices][:, None, :] - centers_arr[None, :, :]) ** 2).sum(axis=2))
-        caps = np.asarray([targets.get(t, 0.0) + tolerance.get(t, 0.0) for t in el_trucks], dtype=float)
-        cur_loads = np.asarray([loads[t] for t in el_trucks], dtype=float)
-        feasible = cur_loads[None, :] + vols[cand_indices][:, None] <= caps[None, :]
-        dist = np.where(feasible, dist, np.inf)
-        best_t_local = dist.argmin(axis=1)
-        best_d = dist[np.arange(len(cand_indices)), best_t_local]
-        feas_rows = np.isfinite(best_d)
-        if not feas_rows.any():
-            break
-        feas_cand = cand_indices[feas_rows]
-        feas_t_indices = best_t_local[feas_rows]
-        order = np.argsort(best_d[feas_rows])
-        placed = False
-        for pos in order:
-            s_idx = feas_cand[pos]
-            if assigned[s_idx] >= 0:
-                continue
-            t = el_trucks[feas_t_indices[pos]]
-            if loads[t] + vols[s_idx] > targets.get(t, 0.0) + tolerance.get(t, 0.0):
-                continue
-            assigned[s_idx] = t_idx[t]
-            loads[t] += vols[s_idx]
-            placed = True
-        if not placed:
-            break
-    for s_idx in np.where(assigned < 0)[0]:
-        cand_trucks = [t for t in trucks if targets.get(t, 0.0) > 0]
-        if not cand_trucks:
-            continue
-        best_t = max(cand_trucks, key=lambda t: targets.get(t, 0.0) - loads.get(t, 0.0))
-        tgt = targets.get(best_t, 0.0)
-        if loads.get(best_t, 0.0) + vols[s_idx] <= tgt + max(tolerance.get(best_t, 0.0), tgt * 0.20):
-            assigned[s_idx] = t_idx[best_t]
-            loads[best_t] += vols[s_idx]
-    return assigned, loads
-
-def consolidate_satellite_pockets(stops: pd.DataFrame, trucks: List[str], targets: Dict[str, float], loads: Dict[str, float], tolerance: Dict[str, float], pocket_radius_m: float = 450.0) -> Tuple[pd.DataFrame, Dict[str, float]]:
-    stops = stops.copy()
-    loads = dict(loads)
-    n = len(stops)
-    if n <= 1:
-        return stops, loads
-    coords = stops[["x", "y"]].to_numpy(dtype=float)
-    if HAS_SCIPY:
-        tree = cKDTree(coords)
-        pairs = tree.query_pairs(r=pocket_radius_m)
-    else:
-        pairs = []
-        for i in range(n):
-            dists_sq = ((coords[i] - coords[i+1:]) ** 2).sum(axis=1)
-            for j_offset, d2 in enumerate(dists_sq):
-                if d2 <= pocket_radius_m ** 2:
-                    pairs.append((i, i + 1 + j_offset))
-    parent = list(range(n))
-    def find(i):
-        path = []
-        while parent[i] != i:
-            path.append(i)
-            i = parent[i]
-        for p in path:
-            parent[p] = i
-        return i
-    def union(i, j):
-        ri, rj = find(i), find(j)
-        if ri != rj:
-            parent[ri] = rj
-    for i, j in pairs:
-        union(i, j)
-    components: Dict[int, List[int]] = {}
-    for i in range(n):
-        root = find(i)
-        components.setdefault(root, []).append(i)
-    centers = {}
-    for t in trucks:
-        grp = stops[stops["assigned_truck"] == t]
-        if not grp.empty:
-            w = np.maximum(grp["total_vol"].to_numpy(dtype=float), 1e-9)
-            centers[t] = np.average(grp[["x", "y"]].to_numpy(dtype=float), axis=0, weights=w)
-    for root, member_indices in components.items():
-        if len(member_indices) >= n * 0.45:
-            continue
-        member_stops = stops.iloc[member_indices]
-        assigned_trucks = [t for t in member_stops["assigned_truck"].unique().tolist() if t in trucks]
-        if len(set(assigned_trucks)) > 1:
-            pw = np.maximum(member_stops["total_vol"].to_numpy(dtype=float), 1e-9)
-            pocket_center = np.average(member_stops[["x", "y"]].to_numpy(dtype=float), axis=0, weights=pw)
-            vip_trucks = member_stops.loc[member_stops["is_locked"].astype(bool), "assigned_truck"].tolist()
-            vip_trucks = [t for t in vip_trucks if t in trucks]
-            best_truck = vip_trucks[0] if vip_trucks else None
-            if best_truck is None:
-                best_dist = float("inf")
-                for t in assigned_trucks:
-                    if t in centers:
-                        d = np.sqrt(((pocket_center - centers[t]) ** 2).sum())
-                        if d < best_dist:
-                            best_dist = d
-                            best_truck = t
-            if best_truck is None and assigned_trucks:
-                best_truck = assigned_trucks[0]
-            if best_truck is not None:
-                for s_idx in member_indices:
-                    old_t = stops.at[s_idx, "assigned_truck"]
-                    if old_t != best_truck:
-                        if not bool(stops.at[s_idx, "is_locked"]) or old_t not in trucks:
-                            v = float(stops.at[s_idx, "total_vol"])
-                            stops.at[s_idx, "assigned_truck"] = best_truck
-                            if old_t in loads:
-                                loads[old_t] -= v
-                            loads[best_truck] = loads.get(best_truck, 0.0) + v
-    return stops, loads
-
-def cleanup_stray_points(stops: pd.DataFrame, trucks: List[str], targets: Dict[str, float], loads: Dict[str, float], tolerance: Dict[str, float], multiplier: float, rounds: int = 3) -> Tuple[pd.DataFrame, Dict[str, float]]:
-    stops = stops.copy()
-    loads = dict(loads)
-    for _ in range(max(1, int(rounds))):
-        changed = False
-        centers = {}
-        for t in trucks:
-            grp = stops[stops["assigned_truck"] == t]
-            if not grp.empty:
-                w = np.maximum(grp["total_vol"].to_numpy(dtype=float), 1e-9)
-                centers[t] = (float(np.average(grp["x"], weights=w)), float(np.average(grp["y"], weights=w)))
-        for t in trucks:
-            mask = (stops["assigned_truck"] == t) & (~stops["is_locked"].astype(bool))
-            grp = stops[mask]
-            if len(grp) < 3 or t not in centers:
-                continue
-            cx, cy = centers[t]
-            dists = np.sqrt((grp["x"] - cx) ** 2 + (grp["y"] - cy) ** 2)
-            stray_indices = grp.index[dists > (float(dists.median()) * 3.0 + 1.0)]
-            for s_idx in stray_indices:
-                stop = stops.loc[s_idx]
-                own_d_sq = (stop["x"] - cx) ** 2 + (stop["y"] - cy) ** 2
-                best_t, best_d_sq = None, float("inf")
-                for ot, (ox, oy) in centers.items():
-                    if ot == t:
-                        continue
-                    d_sq = (stop["x"] - ox) ** 2 + (stop["y"] - oy) ** 2
-                    if d_sq < best_d_sq:
-                        best_d_sq, best_t = d_sq, ot
-                if best_t is None:
-                    continue
-                proj = loads.get(best_t, 0.0) + float(stop["total_vol"])
-                allowed = targets.get(best_t, 0.0) + tolerance.get(best_t, 0.0) * multiplier
-                if best_d_sq < own_d_sq * 0.6 and proj <= allowed:
-                    vol = float(stop["total_vol"])
-                    stops.at[s_idx, "assigned_truck"] = best_t
-                    loads[t] -= vol
-                    loads[best_t] += vol
-                    changed = True
-        if not changed:
-            break
-    return stops, loads
-
-def majority_vote_smoothing(stops: pd.DataFrame, trucks: List[str], targets: Dict[str, float], loads: Dict[str, float], tolerance: Dict[str, float], cfg: ZoningConfig) -> Tuple[pd.DataFrame, Dict[str, float]]:
-    stops = stops.copy().reset_index(drop=True)
-    loads = dict(loads)
-    n_stops = len(stops)
-    if n_stops < cfg.knn_k + 2:
-        return stops, loads
-    coords = stops[["x", "y"]].to_numpy(dtype=float)
-    nbrs = knn_indices(coords, cfg.knn_k)
-    locked = stops["is_locked"].astype(bool).to_numpy()
-    vols = stops["total_vol"].to_numpy(dtype=float)
-    val_trucks = set(trucks)
-    for _ in range(max(1, int(cfg.knn_rounds))):
-        changed = False
-        assigned = stops["assigned_truck"].astype(object).to_numpy().copy()
-        for idx in range(n_stops):
-            if locked[idx]:
-                continue
-            cur_t = assigned[idx]
-            nbr_t = [v for v in assigned[nbrs[idx]].tolist() if v in val_trucks]
-            if not nbr_t:
-                continue
-            vals, counts = np.unique(np.asarray(nbr_t, dtype=str), return_counts=True)
-            maj_t = str(vals[np.argmax(counts)])
-            if maj_t == cur_t or int(counts.max()) < cfg.knn_k * cfg.knn_majority:
-                continue
-            proj = loads.get(maj_t, 0.0) + vols[idx]
-            if proj > targets.get(maj_t, 0.0) + tolerance.get(maj_t, 0.0) * cfg.polish_tol_multiplier:
-                continue
-            if cur_t in val_trucks:
-                loads[cur_t] -= vols[idx]
-            loads[maj_t] = proj
-            assigned[idx] = maj_t
-            changed = True
-        stops["assigned_truck"] = assigned
-        if not changed:
-            break
-    return stops, loads
-
-def swap_improve(stops: pd.DataFrame, trucks: List[str], targets: Dict[str, float], loads: Dict[str, float], tolerance: Dict[str, float], rounds: int = 3, max_pairs: int = 60) -> Tuple[pd.DataFrame, Dict[str, float]]:
-    stops = stops.copy()
-    loads = dict(loads)
-    for _ in range(max(1, int(rounds))):
-        changed = False
-        centers = {}
-        for t in trucks:
-            grp = stops[stops["assigned_truck"] == t]
-            if not grp.empty:
-                w = np.maximum(grp["total_vol"].to_numpy(dtype=float), 1e-9)
-                centers[t] = np.asarray([np.average(grp["x"], weights=w), np.average(grp["y"], weights=w)], dtype=float)
-        for ta, tb in combinations([t for t in trucks if t in centers], 2):
-            ca, cb = centers[ta], centers[tb]
-            ga = stops[(stops["assigned_truck"] == ta) & (~stops["is_locked"].astype(bool))]
-            gb = stops[(stops["assigned_truck"] == tb) & (~stops["is_locked"].astype(bool))]
-            if ga.empty or gb.empty:
-                continue
-            co_a, co_b = ga[["x", "y"]].to_numpy(dtype=float), gb[["x", "y"]].to_numpy(dtype=float)
-            gain_a = np.sqrt(((co_a - ca) ** 2).sum(axis=1)) - np.sqrt(((co_a - cb) ** 2).sum(axis=1))
-            gain_b = np.sqrt(((co_b - cb) ** 2).sum(axis=1)) - np.sqrt(((co_b - ca) ** 2).sum(axis=1))
-            c_a = ga.index[np.argsort(-gain_a)][:max_pairs]
-            c_b = gb.index[np.argsort(-gain_b)][:max_pairs]
-            gl_a, gl_b = dict(zip(ga.index, gain_a)), dict(zip(gb.index, gain_b))
-            used_b = set()
-            for ia in c_a:
-                if gl_a[ia] <= 0:
-                    break
-                for ib in c_b:
-                    if ib in used_b or gl_b[ib] <= 0 or gl_a[ia] + gl_b[ib] <= 0:
-                        continue
-                    va, vb = float(stops.at[ia, "total_vol"]), float(stops.at[ib, "total_vol"])
-                    n_la, n_lb = loads.get(ta, 0.0) - va + vb, loads.get(tb, 0.0) - vb + va
-                    if n_la > targets.get(ta, 0.0) + tolerance.get(ta, 0.0) or n_lb > targets.get(tb, 0.0) + tolerance.get(tb, 0.0):
-                        continue
-                    stops.at[ia, "assigned_truck"], stops.at[ib, "assigned_truck"] = tb, ta
-                    loads[ta], loads[tb] = n_la, n_lb
-                    used_b.add(ib)
-                    changed = True
-                    break
-        if not changed:
-            break
-    return stops, loads
-
-# =====================================================================================
-#  SECTION 6 — DAILY LOAD SMOOTHING & DEPOT HUB DISTANCE
-# =====================================================================================
-def smooth_daily_loads(opt: pd.DataFrame, cfg: ZoningConfig, trucks: List[str]) -> Tuple[pd.DataFrame, np.ndarray, np.ndarray, Dict[str, np.ndarray]]:
-    opt = opt.copy().reset_index(drop=True)
-    trucks = list(dict.fromkeys(str(t).strip() for t in trucks))
-    n_rows = len(opt)
-    if n_rows == 0:
-        empty_mat = np.zeros((0, WORKING_DAYS), dtype=float)
-        return opt, empty_mat, empty_mat.copy(), {t: np.zeros(WORKING_DAYS, dtype=float) for t in trucks}
-    if "สถานะการย้ายวัน" not in opt.columns:
-        opt["สถานะการย้ายวัน"] = "-"
-    if "is_vip_locked" not in opt.columns:
-        opt["is_vip_locked"] = False
-    m_vols = pd.to_numeric(opt[cfg.vol_col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
-    day_map: Dict[int, List[int]] = {}
-    for idx in opt.index:
-        days, status = parse_days_from_string(opt.at[idx, cfg.day_col])
-        if not days:
-            days = list(range(WORKING_DAYS))
-        day_map[idx] = list(sorted(set(days)))
-        opt.at[idx, "_day_status"] = status
-    def recompute_daily():
-        d_vol = {t: np.zeros(WORKING_DAYS, dtype=float) for t in trucks}
-        d_stops = {t: np.zeros(WORKING_DAYS, dtype=float) for t in trucks}
-        for idx in opt.index:
-            t = str(opt.at[idx, "เบอร์รถใหม่"]).strip()
-            if t not in d_vol:
-                continue
-            days = day_map[idx]
-            if not days:
-                continue
-            v_day = m_vols[idx] / len(days) / WEEKS_PER_MONTH
-            for d in days:
-                if 0 <= d < WORKING_DAYS:
-                    d_vol[t][d] += v_day
-                    d_stops[t][d] += 1
-        return d_vol, d_stops
-    d_cap = max(1.0, float(cfg.daily_control_cap))
-    for _ in range(max(1, int(cfg.daily_passes))):
-        d_vol, d_stops = recompute_daily()
-        changed = False
-        for t in trucks:
-            if t not in d_vol:
-                continue
-            score = d_vol[t] / d_cap
-            src_order = np.argsort(-score)
-            for src in src_order:
-                src = int(src)
-                if not (d_vol[t][src] > d_cap):
-                    continue
-                dest_score = (d_vol[t] / d_cap).copy()
-                dest_score[src] = np.inf
-                dest_candidates = np.argsort(dest_score)
-                dest = None
-                for cand in dest_candidates:
-                    cand = int(cand)
-                    if not np.isfinite(dest_score[cand]) or d_vol[t][cand] >= d_cap:
-                        continue
-                    dest = cand
-                    break
-                if dest is None:
-                    continue
-                movable = []
-                for idx in opt.index:
-                    if str(opt.at[idx, "เบอร์รถใหม่"]).strip() != t:
-                        continue
-                    if not cfg.allow_vip_day_move and bool(opt.at[idx, "is_vip_locked"]):
-                        continue
-                    c_days = day_map[idx]
-                    if src not in c_days or dest in c_days or len(c_days) > 3:
-                        continue
-                    movable.append(idx)
-                if not movable:
-                    continue
-                movable.sort(key=lambda idx: -m_vols[idx] / max(1, len(day_map[idx])))
-                excess_v = max(0.0, d_vol[t][src] - TARGET_DAY_CAP)
-                shifted_v = 0.0
-                for idx in movable:
-                    c_days = day_map[idx]
-                    v_day = m_vols[idx] / max(1, len(c_days)) / WEEKS_PER_MONTH
-                    if d_vol[t][dest] + v_day > d_cap:
-                        continue
-                    new_days = sorted(set(dest if d == src else d for d in c_days))
-                    if len(new_days) != len(c_days):
-                        continue
-                    day_map[idx] = new_days
-                    note = f"{DAY_SHORT[src]}→{DAY_SHORT[dest]}"
-                    prev = str(opt.at[idx, "สถานะการย้ายวัน"]).strip()
-                    if not prev or prev.lower() in NO_TRUCK_TOKENS:
-                        opt.at[idx, "สถานะการย้ายวัน"] = note
-                    else:
-                        notes = [n.strip() for n in prev.split(",") if n.strip()]
-                        if note not in notes:
-                            notes.append(note)
-                        opt.at[idx, "สถานะการย้ายวัน"] = ", ".join(notes)
-                    d_vol[t][src] -= v_day
-                    d_vol[t][dest] += v_day
-                    d_stops[t][src] -= 1
-                    d_stops[t][dest] += 1
-                    shifted_v += v_day
-                    changed = True
-                    if d_vol[t][src] <= d_cap and shifted_v >= excess_v:
-                        break
-        if not changed:
-            break
-    for idx in opt.index:
-        opt.at[idx, "วันจัดส่ง(ใหม่)"] = format_days_to_string(day_map[idx])
-        opt.at[idx, "วันจัดส่ง(ย่อ)"] = format_days_short(day_map[idx])
-    daily_mat = np.zeros((n_rows, WORKING_DAYS), dtype=float)
-    daily_s_mat = np.zeros((n_rows, WORKING_DAYS), dtype=float)
-    for idx in opt.index:
-        days = day_map[idx]
-        if not days:
-            continue
-        v_day = m_vols[idx] / len(days) / WEEKS_PER_MONTH
-        for d in days:
-            daily_mat[idx, d] = v_day
-            daily_s_mat[idx, d] = 1.0
-    final_daily, _ = recompute_daily()
-    return opt, daily_mat, daily_s_mat, final_daily
-
-def compute_depot_hub_distance(group: pd.DataFrame, depot_lat: float, depot_lon: float) -> float:
-    if group.empty or depot_lat == 0.0 or depot_lon == 0.0:
-        return 0.0
-    dx, dy, _ = project_xy([depot_lat] + group["_lat_clean"].tolist(), [depot_lon] + group["_lon_clean"].tolist())
-    depot_x, depot_y = dx[0], dy[0]
-    cust_x, cust_y = dx[1:], dy[1:]
-    if len(cust_x) == 0:
-        return 0.0
-    weights = np.ones(len(group), dtype=float)
-    if "total_vol" in group.columns:
-        weights = np.maximum(pd.to_numeric(group["total_vol"], errors="coerce").fillna(0.0).to_numpy(dtype=float), 1e-9)
-    distances = np.sqrt((cust_x - depot_x) ** 2 + (cust_y - depot_y) ** 2) * 2.0
-    return float(np.average(distances, weights=weights))
-
-def calculate_peak_daily_loads(data: pd.DataFrame, truck_col: str, vol_col: str, day_col: str) -> Dict[str, float]:
-    output = {}
-    if data.empty:
-        return output
-    for truck, group in data.groupby(truck_col, dropna=False):
-        t_id = str(truck).strip()
-        if t_id.lower() in NO_TRUCK_TOKENS:
-            continue
-        daily = np.zeros(WORKING_DAYS, dtype=float)
-        for _, row in group.iterrows():
-            days, _ = parse_days_from_string(row.get(day_col))
-            if not days:
-                days = list(range(WORKING_DAYS))
-            vol_m = float(pd.to_numeric(row.get(vol_col), errors="coerce") or 0.0)
-            v_day = vol_m / len(days) / WEEKS_PER_MONTH
-            for d in days:
-                daily[d] += v_day
-        output[t_id] = float(daily.max())
-    return output
-
-# =====================================================================================
-#  SECTION 7 — ENTERPRISE UI & MODERN STYLING (SAFE INJECTION)
-# =====================================================================================
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Sarabun:wght@300;400;500;600;700&display=swap');
-
-html, body, [class*="css"] {
-    font-family: 'Sarabun', 'Plus+Jakarta+Sans', sans-serif !important;
-}
-
-.stApp {
-    background: #F8FAFC !important;
-}
-
-/* Sidebar Styling & Text Visibility */
-[data-testid="stSidebar"] {
-    background: #0F172A !important;
-    border-right: 1px solid #1E293B !important;
-}
-[data-testid="stSidebar"] * {
-    color: #F8FAFC !important;
-}
-[data-testid="stSidebar"] label, [data-testid="stSidebar"] .stMarkdown p, [data-testid="stSidebar"] span {
-    color: #38BDF8 !important;
-    font-weight: 600 !important;
-    font-size: 0.95rem !important;
-}
-[data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
-    color: #38BDF8 !important;
-    border-bottom: 1px solid #1E293B !important;
-    padding-bottom: 8px !important;
-}
-
-/* Fix Dropdown & Input Text inside Sidebar */
-[data-testid="stSidebar"] input, [data-testid="stSidebar"] select, [data-testid="stSidebar"] div[data-baseweb="select"] span {
-    color: #0F172A !important;
-}
-
-/* Modern Tabs Navigation */
-.stTabs [data-baseweb="tab-list"] {
-    gap: 8px;
-    background-color: #E2E8F0;
-    padding: 6px;
-    border-radius: 12px;
-}
-.stTabs [data-baseweb="tab"] {
-    height: 44px;
-    background-color: transparent;
-    border-radius: 8px;
-    color: #475569;
-    font-weight: 700;
-    padding: 0 20px;
-    border: none;
-}
-.stTabs [aria-selected="true"] {
-    background-color: #FFFFFF !important;
-    color: #0284C7 !important;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.08);
-}
-
-/* Cards & Containers */
-.metric-card-modern {
-    background: #FFFFFF;
-    border-radius: 14px;
-    padding: 20px;
-    border: 1px solid #E2E8F0;
-    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
-    transition: transform 0.2s;
-    margin-bottom: 12px;
-}
-.metric-card-modern:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.08);
-}
-
-/* Buttons */
-.stButton>button {
-    background: linear-gradient(135deg, #0284C7 0%, #0369A1 100%) !important;
-    color: #FFFFFF !important;
-    border: none !important;
-    border-radius: 10px;
-    font-weight: 700;
-    padding: 0.6rem 1.2rem;
-    box-shadow: 0 4px 12px rgba(2,132,199,0.25);
-    transition: all 0.2s;
-}
-.stButton>button:hover {
-    background: linear-gradient(135deg, #0369A1 0%, #075985 100%) !important;
-    box-shadow: 0 6px 16px rgba(2,132,199,0.35);
-}
-
-/* Custom Table Container */
-.custom-table-container {
-    overflow-x: auto;
-    background: #FFFFFF;
-    border-radius: 12px;
-    border: 1px solid #E2E8F0;
-    box-shadow: 0 4px 6px -1px rgba(0,0,0,0.02);
-    margin-bottom: 20px;
-}
-.custom-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.95rem;
-    text-align: center;
-}
-.custom-table th {
-    background: #F1F5F9;
-    color: #334155;
-    font-weight: 700;
-    padding: 12px 10px;
-    border-bottom: 2px solid #CBD5E1;
-}
-.custom-table td {
-    padding: 10px;
-    border-bottom: 1px solid #E2E8F0;
-    color: #1E293B;
-    font-weight: 500;
-}
-.custom-table tr:hover td {
-    background: #F8FAFC;
-}
-.text-danger {
-    color: #DC2626 !important;
-    font-weight: 800 !important;
-}
-.text-primary {
-    color: #0284C7 !important;
-    font-weight: 700 !important;
-}
-</style>
-""", unsafe_allow_html=True)
-
-def render_enterprise_metric(label: str, value: str, delta: str = "", status: str = "normal"):
-    border_colors = {"good": "#10B981", "warning": "#F59E0B", "danger": "#EF4444", "normal": "#0284C7"}
-    bg_delta = {"good": "#ECFDF5", "warning": "#FFFBEB", "danger": "#FEF2F2", "normal": "#F0F9FF"}
-    txt_delta = {"good": "#059669", "warning": "#D97706", "danger": "#DC2626", "normal": "#0284C7"}
-    
-    bc = border_colors.get(status, "#0284C7")
-    dc = bg_delta.get(status, "#F0F9FF")
-    tc = txt_delta.get(status, "#0284C7")
-    
-    delta_html = ""
-    if delta:
-        delta_html = f'''<div style="margin-top: 8px;"><span style="background:{dc}; color:{tc}; padding:3px 10px; border-radius:6px; font-weight:700; font-size:0.85rem; display:inline-block;">{delta}</span></div>'''
-        
-    html = f'''
-    <div class="metric-card-modern" style="border-left: 5px solid {bc};">
-        <div style="color: #64748B; font-size: 0.9rem; font-weight: 600; margin-bottom: 4px;">{label}</div>
-        <div style="color: #0F172A; font-size: 1.8rem; font-weight: 800; line-height: 1.2;">{value}</div>
-        {delta_html}
-    </div>
-    '''
-    st.markdown(html, unsafe_allow_html=True)
-
-def reset_results():
-    for k in ('result', 'zoning_cfg_used'):
-        st.session_state.pop(k, None)
-
-def show_loader(placeholder, msg: str):
-    html = f'<div style="text-align:center; padding:2rem; color:#0284C7; font-weight:bold; font-size:1.2rem; border-radius:12px; background:#FFFFFF; border:1px solid #E2E8F0;">{msg}</div>'
-    placeholder.markdown(html, unsafe_allow_html=True)
-
-# =====================================================================================
-#  SECTION 8 — MAIN ENGINE EXECUTION
-# =====================================================================================
-def run_multi_donor_zoning(df: pd.DataFrame, cfg: ZoningConfig, target_pcts: Dict[str, float], dissolve_trucks: Sequence[str], relieve_trucks: Sequence[str], new_trucks: Sequence[str], manual_locks: Sequence[str], exclude_trucks: Sequence[str] = None) -> ZoningResult:
-    warnings, infos = [], []
-    exclude_trucks = exclude_trucks or []
-    if df is None or df.empty:
-        raise ValueError("ไม่มีข้อมูลสำหรับประมวลผล")
-    opt = df.copy().reset_index(drop=True)
-    
-    opt["_lat_clean"] = pd.to_numeric(opt["_lat_clean"], errors="coerce")
-    opt["_lon_clean"] = pd.to_numeric(opt["_lon_clean"], errors="coerce")
-    opt[cfg.vol_col] = pd.to_numeric(opt[cfg.vol_col], errors="coerce").fillna(0.0).clip(lower=0.0).astype(float)
-    opt[cfg.truck_col] = opt[cfg.truck_col].astype(str).str.strip()
-    opt[cfg.id_col] = opt[cfg.id_col].astype(str).str.strip()
-
-    valid_mask = opt["_lat_clean"].notna() & opt["_lon_clean"].notna() & (~opt[cfg.truck_col].str.lower().isin(NO_TRUCK_TOKENS))
-    opt = opt[valid_mask].reset_index(drop=True)
-    opt["coord_key"] = opt["_lat_clean"].round(5).astype(str) + "," + opt["_lon_clean"].round(5).astype(str)
-    px, py, _ = project_xy(opt["_lat_clean"].to_numpy(dtype=float), opt["_lon_clean"].to_numpy(dtype=float), lat0=cfg.depot_lat if cfg.depot_lat != 0 else None)
-    opt["x"], opt["y"] = px, py
-
-    vip_status = opt["VIP_Status"].astype(str).str.upper().str.strip() if "VIP_Status" in opt.columns else pd.Series(["ปกติ"] * len(opt))
-    locked_ids = {str(v).strip() for v in manual_locks if str(v).strip()}
-    opt["is_vip_locked"] = vip_status.eq("VIP") | opt[cfg.id_col].isin(locked_ids)
-    opt["สถานะการย้ายวัน"] = "-"
-
-    exclude_set = set(exclude_trucks)
-    excluded_mask = opt[cfg.truck_col].isin(exclude_set)
-    excluded_df = opt[excluded_mask].copy()
-    opt = opt[~excluded_mask].reset_index(drop=True)
-
-    if opt.empty and not excluded_df.empty:
-        raise ValueError("รถทั้งหมดถูกล็อกไว้ ไม่เหลือข้อมูลสำหรับประมวลผลจัดสาย")
-    elif opt.empty:
-        raise ValueError("ไม่มีข้อมูลสำหรับประมวลผล")
-
-    all_orig_trucks = clean_truck_ids(opt[cfg.truck_col].unique())
-    dissolve = [t for t in all_orig_trucks if t in set(dissolve_trucks)]
-    kept = [t for t in all_orig_trucks if t not in set(dissolve_trucks)]
-    norm_new = [t.strip() for t in new_trucks if t.strip() and t.strip() not in kept and t.strip().lower() not in NO_TRUCK_TOKENS]
-    active = kept + list(dict.fromkeys(norm_new))
-    if not active:
-        raise ValueError("ไม่เหลือรถที่สามารถรับการจัดสรรงานได้")
-
-    targets = {t: max(0.0, cfg.monthly_capacity * float(target_pcts.get(t, 0.0)) / 100.0) for t in active}
-    tolerance = {t: _tolerance_for(t, targets, cfg) for t in active}
-    
-    opt[cfg.lat_col] = opt["_lat_clean"]
-    opt[cfg.lon_col] = opt["_lon_clean"]
-    stops = build_stops(opt, cfg)
-
-    vol_by_orig = stops.groupby("orig_truck")["total_vol"].sum().to_dict()
-    ratio_override = {}
-    for t in relieve_trucks:
-        c_vol = float(vol_by_orig.get(t, 0.0))
-        if c_vol > 0 and t in targets:
-            ratio_override[t] = max(0.0, min(100.0, targets[t] / c_vol * 100.0 * 0.92))
-
-    core_eligible = [t for t in kept if t not in set(dissolve)]
-    seeds: Dict[str, Tuple[float, float]] = {}
-    for t in kept:
-        grp = stops[stops["orig_truck"] == t]
-        if not grp.empty:
-            w = np.maximum(grp["total_vol"].to_numpy(dtype=float), 1e-9)
-            seeds[t] = (float(np.average(grp["x"], weights=w)), float(np.average(grp["y"], weights=w)))
-
-    gw = np.maximum(stops["total_vol"].to_numpy(dtype=float), 1e-9)
-    gx, gy = float(np.average(stops["x"], weights=gw)), float(np.average(stops["y"], weights=gw))
-    if cfg.depot_lat != 0 and cfg.depot_lon != 0:
-        dx_depot, dy_depot, _ = project_xy([cfg.depot_lat], [cfg.depot_lon], lat0=cfg.depot_lat)
-        depot_coord = (float(dx_depot[0]), float(dy_depot[0]))
-    else:
-        depot_coord = (gx, gy)
-
-    if norm_new:
-        init_cores = compute_core_keys(stops, cfg.core_ratio, core_eligible, ratio_override)
-        spool = stops[~stops["coord_key"].isin(init_cores)]
-        if spool.empty:
-            spool = stops
-        new_centers = kmeans_seeds(spool[["x", "y"]].to_numpy(dtype=float), spool["total_vol"].to_numpy(dtype=float), len(norm_new))
-        if len(new_centers) == 0:
-            new_centers = np.asarray([depot_coord], dtype=float)
-        for idx, t in enumerate(norm_new):
-            c_idx = min(idx, len(new_centers) - 1)
-            seeds[t] = (float(new_centers[c_idx, 0]), float(new_centers[c_idx, 1]))
-
-    def run_single_pass(core_ratio: float):
-        c_stops = stops.copy()
-        c_keys = compute_core_keys(c_stops, core_ratio, core_eligible, ratio_override)
-        c_stops["is_core_locked"] = c_stops["coord_key"].isin(c_keys)
-        c_stops["is_locked"] = c_stops["has_vip_lock"].astype(bool) | c_stops["is_core_locked"].astype(bool)
-        c_stops["assigned_truck"] = None
-        for s_idx, row in c_stops.iterrows():
-            ot = str(row["orig_truck"]).strip()
-            if bool(row["is_locked"]) and ot in active:
-                c_stops.at[s_idx, "assigned_truck"] = ot
-        assignment, pass_loads = _assign_capacitated(c_stops, active, targets, tolerance, seeds)
-        c_stops["assigned_truck"] = [active[ti] if ti >= 0 else OVERFLOW_LABEL for ti in assignment]
-        c_stops.loc[c_stops["is_locked"] & (~c_stops["orig_truck"].isin(active)), "is_locked"] = False
-        return c_stops, pass_loads
-
-    cur_ratio = max(0.0, min(100.0, float(cfg.core_ratio)))
-    min_ratio = max(0.0, min(cur_ratio, float(cfg.core_floor)))
-    c_step = max(1.0, float(cfg.core_step))
-    best_result = None
-
-    while True:
-        c_stops, c_loads = run_single_pass(cur_ratio)
-        tot_viol = sum(max(0.0, abs(c_loads.get(t, 0.0) - targets.get(t, 0.0)) - tolerance.get(t, 0.0)) for t in active if targets.get(t, 0.0) > 0)
-        over_v = float(c_stops.loc[c_stops["assigned_truck"] == OVERFLOW_LABEL, "total_vol"].sum())
-        score = tot_viol + over_v * 2.0
-        if best_result is None or score < best_result[3]:
-            best_result = (c_stops, c_loads, cur_ratio, score)
-        if score <= 1e-6 or cur_ratio <= min_ratio:
-            break
-        cur_ratio = max(min_ratio, cur_ratio - c_step)
-
-    assigned_stops, loads, ratio_used, _ = best_result
-    assigned_stops, loads = consolidate_satellite_pockets(assigned_stops, active, targets, loads, tolerance, pocket_radius_m=450.0)
-    if cfg.enable_stray_cleanup:
-        assigned_stops, loads = cleanup_stray_points(assigned_stops, active, targets, loads, tolerance, cfg.polish_tol_multiplier)
-    if cfg.enable_majority_vote:
-        assigned_stops, loads = majority_vote_smoothing(assigned_stops, active, targets, loads, tolerance, cfg)
-    if cfg.enable_swap:
-        assigned_stops, loads = swap_improve(assigned_stops, active, targets, loads, tolerance, cfg.swap_rounds)
-    assigned_stops, loads = consolidate_satellite_pockets(assigned_stops, active, targets, loads, tolerance, pocket_radius_m=450.0)
-
-    truck_mapping = dict(zip(assigned_stops["coord_key"], assigned_stops["assigned_truck"]))
-    core_mapping = dict(zip(assigned_stops["coord_key"], assigned_stops["is_core_locked"]))
-    opt["เบอร์รถใหม่"] = opt["coord_key"].map(truck_mapping).fillna(OVERFLOW_LABEL).astype(str)
-    opt["is_core_locked"] = opt["coord_key"].map(core_mapping).fillna(False).astype(bool)
-    opt["is_locked"] = opt["is_vip_locked"].astype(bool) | opt["is_core_locked"].astype(bool)
-
-    orig_s = opt[cfg.truck_col].astype(str).str.strip()
-    new_s = opt["เบอร์รถใหม่"].astype(str).str.strip()
-    opt["สถานะ"] = np.where(orig_s == new_s, "คงเดิม", "ย้ายไปสาย " + new_s)
-    opt.loc[opt["is_locked"] & (orig_s == new_s), "สถานะ"] = "คงเดิม 🔒"
-
-    if not excluded_df.empty:
-        excluded_df["เบอร์รถใหม่"] = excluded_df[cfg.truck_col]
-        excluded_df["is_core_locked"] = True
-        excluded_df["is_vip_locked"] = True
-        excluded_df["is_locked"] = True
-        excluded_df["สถานะ"] = "คงเดิม (ล็อกคัน) 🔒"
-        opt = pd.concat([opt, excluded_df], ignore_index=True)
-
-    all_final_trucks = active + list(exclude_set)
-    opt, daily_matrix, daily_stops_matrix, final_daily = smooth_daily_loads(opt, cfg, all_final_trucks)
-
-    comp_before = [compute_depot_hub_distance(grp, cfg.depot_lat, cfg.depot_lon) for _, grp in opt.groupby(cfg.truck_col)]
-    comp_after = [compute_depot_hub_distance(grp, cfg.depot_lat, cfg.depot_lon) for t, grp in opt.groupby("เบอร์รถใหม่") if t != OVERFLOW_LABEL]
-    peak_before = calculate_peak_daily_loads(opt, cfg.truck_col, cfg.vol_col, cfg.day_col)
-    peak_after = {t: float(v.max()) for t, v in final_daily.items()}
-    moved_m_full = opt[cfg.truck_col].astype(str).str.strip() != opt["เบอร์รถใหม่"].astype(str).str.strip()
-
-    metrics = {
-        "compact_before_km": float(np.mean(comp_before)) / 1000.0 if comp_before else 0.0,
-        "compact_after_km": float(np.mean(comp_after)) / 1000.0 if comp_after else 0.0,
-        "over_before": int(sum(1 for v in peak_before.values() if v > cfg.daily_control_cap)),
-        "over_after": int(sum(1 for v in peak_after.values() if v > cfg.daily_control_cap)),
-        "peak_before": max(peak_before.values()) if peak_before else 0.0,
-        "peak_after": max(peak_after.values()) if peak_after else 0.0,
-        "moved_cust": int(moved_m_full.sum()),
-        "moved_pct": float(moved_m_full.sum()) / max(1, len(opt)) * 100.0,
-        "moved_vol": float(opt.loc[moved_m_full, cfg.vol_col].sum()),
-        "std_before": float(np.std(list(peak_before.values()))) if peak_before else 0.0,
-        "std_after": float(np.std(list(peak_after.values()))) if peak_after else 0.0,
-    }
-
-    return ZoningResult(
-        result_df=opt, stops_df=assigned_stops, daily_matrix=daily_matrix,
-        daily_stops=daily_stops_matrix, final_daily=final_daily,
-        targets=targets, loads=loads, core_ratio_used=float(ratio_used),
-        metrics=metrics, warnings=warnings, infos=infos
-    )
-
-# =====================================================================================
-#  SECTION 9 — DATA IMPORT & MAPPING UI (ENTERPRISE SIDEBAR)
+#  SECTION 5 — UI & EXECUTION
 # =====================================================================================
 st.title("🚛 Smart Route Rebalancer — Enterprise")
 st.markdown("<div style='color:#64748B; font-weight:600; margin-bottom:1rem;'>ระบบวิเคราะห์และตัดสายส่งน้ำอัตโนมัติ (Multi-Depot Multi-Select Hub Architecture)</div>", unsafe_allow_html=True)
@@ -1189,7 +295,7 @@ df_raw = df_raw.copy()
 cols = df_raw.columns.tolist()
 
 # =====================================================================================
-#  STEP 2: FORCED MULTI-DEPOT MULTI-SELECT (RIGHT AFTER LOADING SHEET)
+#  STEP 2: MULTI-DEPOT MULTI-SELECT
 # =====================================================================================
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🏢 2. เลือกคลัง/สาขา (เลือกได้หลายสาขา)")
@@ -1208,7 +314,7 @@ else:
     df = df_raw.copy()
 
 # =====================================================================================
-#  STEP 3: COLUMN MAPPING UI (CONFIRM COLUMNS)
+#  STEP 3: COLUMN MAPPING UI
 # =====================================================================================
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🧭 3. ยืนยันคอลัมน์ข้อมูลจากชีต")
@@ -1223,14 +329,14 @@ def sel(label, keys, allow_none=False):
     return st.sidebar.selectbox(label, cols, index=i, on_change=reset_results)
 
 gps_col = sel("คอลัมน์พิกัด GPS:", ['พิกัด', 'gps', 'lat'])
-vol_col = sel("คอลัมน์ยอดส่งเฉลี่ย (ถัง/เดือน):", ['ยอดเฉลี่ย', 'ยอดส่ง', 'volume'])
+vol_col = sel("คอลัมน์ยอดส่งเฉลี่ยต่อวัน:", ['ยอดเฉลี่ย', 'ยอดส่ง', 'volume'])
 truck_col = sel("คอลัมน์เบอร์รถ:", ['เบอร์รถ', 'รถ', 'truck'])
 day_col = sel("📅 คอลัมน์รอบส่ง/วัน:", ['รอบส่ง', 'วัน', 'day'])
 id_col = sel("คอลัมน์รหัสสมาชิก:", ['รหัสสมาชิก', 'รหัส', 'id'])
 vip_col = sel("คอลัมน์สถานะ (VIP/ปกติ):", ['สถานะ', 'vip'], allow_none=True)
 name_col = sel("คอลัมน์ชื่อลูกค้า:", ['ชื่อ', 'name'], allow_none=True)
 
-# Auto-extract Lat, Lon from single GPS column
+# Auto-extract Lat, Lon
 def split_lat_lon(val):
     try:
         parts = str(val).split(',')
@@ -1244,13 +350,13 @@ coords_extracted = df[gps_col].apply(split_lat_lon)
 df["_lat_clean"] = [c[0] for c in coords_extracted]
 df["_lon_clean"] = [c[1] for c in coords_extracted]
 
-# Use exact average volume column values
-df[vol_col] = pd.to_numeric(df[vol_col], errors='coerce').fillna(0).astype(float)
+# แปลงยอดรายวันในชีตให้เป็นยอดสะสมต่อเดือนเพื่อใช้ในโมเดล Hub Routing
+df["_vol_daily"] = pd.to_numeric(df[vol_col], errors='coerce').fillna(0).astype(float)
+df[vol_col] = df["_vol_daily"] * WEEKS_PER_MONTH
 df[truck_col] = df[truck_col].astype(str).str.strip()
 df[id_col] = df[id_col].astype(str).str.strip()
 df['VIP_Status'] = df[vip_col].astype(str).str.strip() if vip_col else 'ปกติ'
 
-# Set Depot Lat/Lon Hub dynamically based on filtered branches center of gravity
 depot_lat, depot_lon = float(df["_lat_clean"].mean()), float(df["_lon_clean"].mean())
 depot_sub = df.dropna(subset=["_lat_clean", "_lon_clean"])
 if not depot_sub.empty:
@@ -1361,7 +467,7 @@ if st.sidebar.button("🚀 ประมวลผลจัดสายส่ง�
     ph.empty()
 
 # =====================================================================================
-#  SECTION 10 — MODERN ENTERPRISE TABS UI (ORGANIZED DASHBOARD)
+#  SECTION 10 — TABS UI & DASHBOARD
 # =====================================================================================
 tab1, tab2, tab3 = st.tabs([
     "📊 1. ภาพรวมและวินิจฉัย (Dashboard)", 

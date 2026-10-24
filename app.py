@@ -1,6 +1,6 @@
 # =====================================================================================
-#  SMART ROUTE REBALANCER — STRICT GATED ENTERPRISE EDITION v7.0
-#  Strict Step-by-Step: 1. Load Sheet -> 2. Select Depot First -> 3. Calculate & Map
+#  SMART ROUTE REBALANCER — STRICT GATED ENTERPRISE EDITION v7.1
+#  Fixed CSV Download Parameter & Complete Execution Guard
 # =====================================================================================
 from __future__ import annotations
 
@@ -246,9 +246,9 @@ def show_loader(placeholder, msg: str):
     placeholder.markdown(html, unsafe_allow_html=True)
 
 # =====================================================================================
-#  UI & STRICT GATED FLOW EXECUTION
+#  UI & STRICT GATED FLOW EXECUTION (v7.1)
 # =====================================================================================
-st.title("🚛 Smart Route Rebalancer — Enterprise v7.0")
+st.title("🚛 Smart Route Rebalancer — Enterprise v7.1")
 st.markdown("<div style='color:#64748B; font-weight:600; margin-bottom:1rem;'>ระบบวิเคราะห์และตัดสายส่งน้ำอัตโนมัติ (Strict Gated Step-by-Step)</div>", unsafe_allow_html=True)
 
 # --- STAGE 1: LOAD SHEET DATA ONLY ---
@@ -599,6 +599,6 @@ with tab3:
         st.dataframe(rdf[f_cols].rename(columns={truck_col: "เบอร์รถเดิม"}), use_container_width=True)
 
         csv_data = rdf[f_cols].to_csv(index=False).encode('utf-8-sig')
-        st.download_button("📥 ดาวน์โหลดผลการจัดสายส่ง (CSV)", csv_data, 'sprinkle_rebalance_enterprise.csv', 'text/csv', use_keyword_width=True)
+        st.download_button("📥 ดาวน์โหลดผลการจัดสายส่ง (CSV)", csv_data, 'sprinkle_rebalance_enterprise.csv', 'text/csv', use_container_width=True)
     else:
         st.info("💡 กรุณากดปุ่ม '🚀 ประมวลผลจัดสายส่งใหม่' เพื่อดูตารางรายงานและดาวน์โหลดข้อมูล")

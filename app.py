@@ -1,6 +1,6 @@
 # =====================================================================================
-#  SMART ROUTE REBALANCER — MULTI-DEPOT ENTERPRISE EDITION v5.0 (FULL CLEAN CODE)
-#  Multi-Depot Multi-Select Architecture + Exact Volume & Corrected Sidebar Flow
+#  SMART ROUTE REBALANCER — MULTI-DEPOT ENTERPRISE EDITION v5.1
+#  Forced Sidebar Depot Selector Multi-Select + Correct Flow Architecture
 # =====================================================================================
 from __future__ import annotations
 
@@ -1189,7 +1189,7 @@ df_raw = df_raw.copy()
 cols = df_raw.columns.tolist()
 
 # =====================================================================================
-#  STEP 2: MULTI-DEPOT MULTI-SELECT (CHOOSE BRANCHES IMMEDIATELY AFTER LOADING)
+#  STEP 2: FORCED MULTI-DEPOT MULTI-SELECT (RIGHT AFTER LOADING SHEET)
 # =====================================================================================
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🏢 2. เลือกคลัง/สาขา (เลือกได้หลายสาขา)")

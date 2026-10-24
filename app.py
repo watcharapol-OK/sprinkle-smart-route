@@ -1,6 +1,6 @@
 # =====================================================================================
-#  SMART ROUTE REBALANCER — MULTI-DEPOT ENTERPRISE EDITION v4.8
-#  Multi-Depot Multi-Select Architecture + Direct Volume Integration
+#  SMART ROUTE REBALANCER — MULTI-DEPOT ENTERPRISE EDITION v5.0 (FULL CLEAN CODE)
+#  Multi-Depot Multi-Select Architecture + Exact Volume & Corrected Sidebar Flow
 # =====================================================================================
 from __future__ import annotations
 
@@ -1189,17 +1189,17 @@ df_raw = df_raw.copy()
 cols = df_raw.columns.tolist()
 
 # =====================================================================================
-#  STEP 2: MULTI-DEPOT MULTI-SELECT (CHOOSE BRANCHES FIRST)
+#  STEP 2: MULTI-DEPOT MULTI-SELECT (CHOOSE BRANCHES IMMEDIATELY AFTER LOADING)
 # =====================================================================================
 st.sidebar.markdown("---")
-st.sidebar.markdown("### 🏢 2. เลือกคลัง/สาขา (รองรับหลายสาขา)")
+st.sidebar.markdown("### 🏢 2. เลือกคลัง/สาขา (เลือกได้หลายสาขา)")
 
 depot_col_guess = guess_col(['คลัง', 'สาขา', 'depot'], cols, allow_none=True)
 selected_depots = []
 
 if depot_col_guess and depot_col_guess in df_raw.columns:
     all_depots = sorted(df_raw[depot_col_guess].dropna().astype(str).unique().tolist())
-    selected_depots = st.sidebar.multiselect("เลือกสาขาที่ต้องการทำสายส่ง (เลือกได้มากกว่า 1):", options=all_depots, default=all_depots[:1] if all_depots else [], on_change=reset_results)
+    selected_depots = st.sidebar.multiselect("เลือกสาขาที่ต้องการทำสายส่ง:", options=all_depots, default=all_depots[:1] if all_depots else [], on_change=reset_results)
     if selected_depots:
         df = df_raw[df_raw[depot_col_guess].astype(str).str.strip().isin(selected_depots)].reset_index(drop=True)
     else:
@@ -1208,7 +1208,7 @@ else:
     df = df_raw.copy()
 
 # =====================================================================================
-#  STEP 3: COLUMN MAPPING UI
+#  STEP 3: COLUMN MAPPING UI (CONFIRM COLUMNS)
 # =====================================================================================
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🧭 3. ยืนยันคอลัมน์ข้อมูลจากชีต")
@@ -1223,7 +1223,6 @@ def sel(label, keys, allow_none=False):
     return st.sidebar.selectbox(label, cols, index=i, on_change=reset_results)
 
 gps_col = sel("คอลัมน์พิกัด GPS:", ['พิกัด', 'gps', 'lat'])
-depot_col = sel("คอลัมน์คลัง/สาขา:", ['คลัง', 'สาขา', 'depot'], allow_none=True)
 vol_col = sel("คอลัมน์ยอดส่งเฉลี่ย (ถัง/เดือน):", ['ยอดเฉลี่ย', 'ยอดส่ง', 'volume'])
 truck_col = sel("คอลัมน์เบอร์รถ:", ['เบอร์รถ', 'รถ', 'truck'])
 day_col = sel("📅 คอลัมน์รอบส่ง/วัน:", ['รอบส่ง', 'วัน', 'day'])
@@ -1245,11 +1244,11 @@ coords_extracted = df[gps_col].apply(split_lat_lon)
 df["_lat_clean"] = [c[0] for c in coords_extracted]
 df["_lon_clean"] = [c[1] for c in coords_extracted]
 
-# ใช้งานค่ายอดส่งเฉลี่ยจากคอลัมน์ที่เลือกทันทีตามจริง
+# Use exact average volume column values
 df[vol_col] = pd.to_numeric(df[vol_col], errors='coerce').fillna(0).astype(float)
 df[truck_col] = df[truck_col].astype(str).str.strip()
 df[id_col] = df[id_col].astype(str).str.strip()
-df['VIP_Status'] = vip_col and vip_col in df.columns and df[vip_col].astype(str).str.upper().str.strip().eq("VIP") or pd.Series([False]*len(df))
+df['VIP_Status'] = df[vip_col].astype(str).str.strip() if vip_col else 'ปกติ'
 
 # Set Depot Lat/Lon Hub dynamically based on filtered branches center of gravity
 depot_lat, depot_lon = float(df["_lat_clean"].mean()), float(df["_lon_clean"].mean())

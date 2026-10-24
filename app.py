@@ -1,6 +1,6 @@
 # =====================================================================================
-#  SMART ROUTE REBALANCER — STRICT GATED ENTERPRISE EDITION v7.1
-#  Fixed CSV Download Parameter & Complete Execution Guard
+#  SMART ROUTE REBALANCER — STRICT GATED ENTERPRISE EDITION v8.0
+#  Absolute Gate: Renders ONLY Sheet Load & Depot Selector until branches are chosen.
 # =====================================================================================
 from __future__ import annotations
 
@@ -38,25 +38,17 @@ if 'truck_pcts' not in st.session_state:
 if 'raw_key' not in st.session_state:
     st.session_state.raw_key = ""
 
-# =====================================================================================
-#  SECTION 1 — CONSTANTS & DOMAIN MODEL
-# =====================================================================================
 WORKING_DAYS = 6
 WEEKS_PER_MONTH = 4.333
 DAYS_PER_MONTH = WORKING_DAYS * WEEKS_PER_MONTH
 
 DEFAULT_MONTHLY_CAPACITY = 4160.0
 DEFAULT_DAILY_CONTROL_CAP = 156.0
-
 OVERFLOW_LABEL = "ส่วนเกิน (Overflow)"
 NO_TRUCK_TOKENS = {"", "nan", "none", "null", "-", "ไม่ระบุ", "na", "n/a"}
 
 OPTIMAL_MIN = 140
-OPTIMAL_MAX = 155
 AVOID_MIN = 121
-AVOID_MAX = 139
-TARGET_DAY_CAP = 148
-
 EARTH_RADIUS_M = 6371008.8
 
 DAY_NAMES = {0: "จันทร์", 1: "อังคาร", 2: "พุธ", 3: "พฤหัสบดี", 4: "ศุกร์", 5: "เสาร์"}
@@ -70,9 +62,6 @@ DAY_TOKENS: List[Tuple[str, int]] = [
 ]
 ALL_DAYS_TOKENS = ("ทุกวัน", "จ-ส", "จันทร์-เสาร์", "จ.-ส.", "ทุกวันทำการ")
 
-# =====================================================================================
-#  SECTION 2 — PURE HELPERS
-# =====================================================================================
 def parse_days_from_string(val_str) -> Tuple[List[int], str]:
     raw = "" if val_str is None else str(val_str)
     val = raw.strip().lower()
@@ -246,12 +235,12 @@ def show_loader(placeholder, msg: str):
     placeholder.markdown(html, unsafe_allow_html=True)
 
 # =====================================================================================
-#  UI & STRICT GATED FLOW EXECUTION (v7.1)
+#  UI & STRICT GATED EXECUTION (v8.0)
 # =====================================================================================
-st.title("🚛 Smart Route Rebalancer — Enterprise v7.1")
+st.title("🚛 Smart Route Rebalancer — Enterprise v8.0")
 st.markdown("<div style='color:#64748B; font-weight:600; margin-bottom:1rem;'>ระบบวิเคราะห์และตัดสายส่งน้ำอัตโนมัติ (Strict Gated Step-by-Step)</div>", unsafe_allow_html=True)
 
-# --- STAGE 1: LOAD SHEET DATA ONLY ---
+# --- STAGE 1: LOAD SHEET DATA ---
 st.sidebar.markdown("### 📁 1. นำเข้าข้อมูลบริษัท")
 sheet_url = st.sidebar.text_input("🔗 ลิงก์ Google Sheets:", value="https://docs.google.com/spreadsheets/d/1PqliJwDoK27SCAj2nlcwkeHmDOdKEQqVcpUaRnQaTWc/edit?usp=sharing", placeholder="วางลิงก์ที่นี่...")
 raw_gid = st.sidebar.text_input("แท็บชีต (GID):", value="0")
@@ -295,7 +284,7 @@ if df_raw is None or df_raw.empty:
 df_raw = df_raw.copy()
 cols = df_raw.columns.tolist()
 
-# --- STAGE 2: SELECT DEPOT / BRANCH FIRST (STRICT GATE) ---
+# --- STAGE 2: SELECT DEPOT / BRANCH FIRST (ABSOLUTE GATE) ---
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🏢 2. เลือกคลัง/สาขา (เลือกได้หลายสาขา)")
 
@@ -309,15 +298,15 @@ else:
     st.sidebar.warning("⚠️ ไม่พบคอลัมน์คลัง/สาขาในชีต กรุณาตรวจสอบหัวตาราง")
     all_depots = []
 
-# 🛑 STRICT GATE: หยุดรอจนกว่าผู้ใช้จะเลือกสาขา ถึงจะให้ทำขั้นตอนต่อไป
+# 🛑 ABSOLUTE GATE: ถ้ายังไม่เลือกสาขา ให้หยุดการทำงานทั้งหมดทันทีตรงนี้ ห้ามคำนวณหรือแสดงผลใดๆ ทั้งสิ้น
 if not selected_depots:
-    st.warning("🛑 กรุณาเลือก 'คลัง/สาขา' ที่แถบเมนูด้านซ้ายอย่างน้อย 1 สาขา เพื่อดำเนินการต่อ")
+    st.warning("🛑 กรุณาเลือก 'คลัง/สาขา' ที่แถบเมนูด้านซ้ายอย่างน้อย 1 สาขา เพื่อปลดล็อกและเริ่มทำการคำนวณ")
     st.stop()
 
-# กรองข้อมูลเฉพาะสาขาที่ถูกเลือก
+# เมื่อเลือกสาขาแล้ว ค่อยกรองข้อมูลเฉพาะสาขานั้น
 df = df_raw[df_raw[depot_col_guess].astype(str).str.strip().isin(selected_depots)].reset_index(drop=True)
 
-# --- STAGE 3: COLUMN MAPPING & CONFIG AFTER DEPOT SELECTED ---
+# --- STAGE 3: COLUMN MAPPING & EXECUTION AFTER DEPOT SELECTED ---
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🧭 3. ยืนยันคอลัมน์ข้อมูลจากสาขาที่เลือก")
 def sel(label, keys, allow_none=False):

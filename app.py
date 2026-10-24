@@ -1,6 +1,6 @@
 # =====================================================================================
-#  SMART ROUTE REBALANCER — MULTI-DEPOT ENTERPRISE EDITION v4.2
-#  Direct Volume Integration + Auto-Split GPS + Hub-and-Spoke Distance
+#  SMART ROUTE REBALANCER — MULTI-DEPOT ENTERPRISE EDITION v4.4
+#  Forced Depot Selector First + Auto-Split GPS + Hub-and-Spoke Distance
 # =====================================================================================
 from __future__ import annotations
 
@@ -1223,21 +1223,22 @@ coords_extracted = df[gps_col].apply(split_lat_lon)
 df["_lat_clean"] = [c[0] for c in coords_extracted]
 df["_lon_clean"] = [c[1] for c in coords_extracted]
 
-# ใช้ค่ายอดส่งเฉลี่ยตามจริงทันทีโดยไม่ต้องคูณเพิ่ม
 df[vol_col] = pd.to_numeric(df[vol_col], errors='coerce').fillna(0).astype(float)
 df[truck_col] = df[truck_col].astype(str).str.strip()
 df[id_col] = df[id_col].astype(str).str.strip()
 df['VIP_Status'] = df[vip_col].astype(str).str.strip() if vip_col else 'ปกติ'
 
-# Multi-Depot Filtering UI
+# =====================================================================================
+#  STEP 3: SELECT DEPOT FIRST (PRIORITY FILTER)
+# =====================================================================================
 st.sidebar.markdown("---")
-st.sidebar.markdown("### 🏢 3. เลือกคลัง/สาขา และพิกัด Hub")
+st.sidebar.markdown("### 🏢 3. เลือกคลัง/สาขา (Depot Hub)")
 selected_depot = "ทั้งหมด (All Depots)"
 depot_lat, depot_lon = float(df["_lat_clean"].mean()), float(df["_lon_clean"].mean())
 
 if depot_col and depot_col in df.columns:
     depot_list = ["ทั้งหมด (All Depots)"] + sorted(df[depot_col].dropna().astype(str).unique().tolist())
-    selected_depot = st.sidebar.selectbox("เลือกคลังที่ต้องการวิเคราะห์:", depot_list, on_change=reset_results)
+    selected_depot = st.sidebar.selectbox("เลือกสาขาที่ต้องการทำสายส่ง:", depot_list, on_change=reset_results)
     if selected_depot != "ทั้งหมด (All Depots)":
         df = df[df[depot_col].astype(str).str.strip() == selected_depot].reset_index(drop=True)
         depot_sub = df.dropna(subset=["_lat_clean", "_lon_clean"])

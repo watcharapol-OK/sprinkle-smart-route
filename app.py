@@ -1,6 +1,6 @@
 # =====================================================================================
-#  SMART ROUTE REBALANCER — ENTERPRISE GATED STEP-BY-STEP EDITION v6.1
-#  Forced Order: 1. Load Sheet -> 2. Select Depot First -> 3. Column Mapping
+#  SMART ROUTE REBALANCER — ENTERPRISE GATED STEP-BY-STEP EDITION v6.2
+#  Fixed Session State Initialization & Slider Callback Error
 # =====================================================================================
 from __future__ import annotations
 
@@ -240,7 +240,7 @@ def diagnose_fleet(df: pd.DataFrame, cfg: ZoningConfig) -> pd.DataFrame:
 # =====================================================================================
 #  SECTION 5 — UI & GATED STEP-BY-STEP EXECUTION
 # =====================================================================================
-st.title("🚛 Smart Route Rebalancer — Enterprise v6.1")
+st.title("🚛 Smart Route Rebalancer — Enterprise v6.2")
 st.markdown("<div style='color:#64748B; font-weight:600; margin-bottom:1rem;'>ระบบวิเคราะห์และตัดสายส่งน้ำอัตโนมัติ (Step-by-Step Enterprise Edition)</div>", unsafe_allow_html=True)
 
 # --- STEP 1: LOAD DATA ---
@@ -393,6 +393,11 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("### 🎛️ 7. เป้าหมายรายคัน (%)")
 depot_fp_key = ",".join(sorted(selected_depots)) if selected_depots else "all"
 fingerprint = "|".join([sheet_url, sheet_gid, depot_fp_key, vol_col, truck_col, day_col, str(sorted(dissolve_trucks)), str(sorted(relieve_trucks)), str(new_trucks), str(sorted(exclude_trucks)), f"{monthly_cap}", f"{daily_cap}", f"{depot_lat}", f"{depot_lon}"])
+
+# Safe initialization for session state truck_pcts
+if 'truck_pcts' not in st.session_state:
+    st.session_state.truck_pcts = {}
+
 if st.sidebar.button("🔄 คำนวณเป้าหมายอัตโนมัติ"):
     st.session_state.pop('slider_fp', None)
     reset_results()
@@ -407,6 +412,8 @@ if st.session_state.get('slider_fp') != fingerprint:
     st.session_state['slider_fp'] = fingerprint
 
 def on_slider_change(changed: str):
+    if 'truck_pcts' not in st.session_state:
+        st.session_state.truck_pcts = {}
     new_val = max(0.0, min(200.0, st.session_state.get(f"slider_{changed}", 0.0)))
     old = st.session_state.truck_pcts.get(changed, new_val)
     diff = new_val - old
@@ -428,7 +435,8 @@ for t in active_trucks:
     with c2:
         st.checkbox("🔒", key=f"lock_{t}", on_change=reset_results)
     with c1:
-        v = st.slider(f"{'🆕 ' if t in new_trucks else ''}รถ {t} (%)", 0.0, 200.0, step=0.1, key=f"slider_{t}", on_change=on_slider_change, args=(t,))
+        default_v = float(st.session_state.truck_pcts.get(t, 100.0))
+        v = st.slider(f"{'🆕 ' if t in new_trucks else ''}รถ {t} (%)", 0.0, 200.0, value=default_v, step=0.1, key=f"slider_{t}", on_change=on_slider_change, args=(t,))
         target_pcts[t] = v
         st.session_state.truck_pcts[t] = v
 

@@ -1,6 +1,6 @@
 # =====================================================================================
-#  SMART ROUTE REBALANCER — ENTERPRISE GATED STEP-BY-STEP EDITION v6.3
-#  Full Session State Guard & Robust Flow Architecture
+#  SMART ROUTE REBALANCER — STRICT GATED ENTERPRISE EDITION v7.0
+#  Strict Step-by-Step: 1. Load Sheet -> 2. Select Depot First -> 3. Calculate & Map
 # =====================================================================================
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Initialize Session State early to prevent AttributeError
+# Initialize Session State
 if 'truck_pcts' not in st.session_state:
     st.session_state.truck_pcts = {}
 if 'raw_key' not in st.session_state:
@@ -148,9 +148,6 @@ def guess_col(substrings: Sequence[str], cols: Sequence[str], fallback: Optional
         return None
     return fallback if fallback is not None else (cols[0] if len(cols) else None)
 
-# =====================================================================================
-#  SECTION 3 — CONFIG / RESULT DATACLASSES
-# =====================================================================================
 @dataclass
 class ZoningConfig:
     lat_col: str
@@ -194,9 +191,6 @@ class ZoningResult:
     warnings: List[str] = field(default_factory=list)
     infos: List[str] = field(default_factory=list)
 
-# =====================================================================================
-#  SECTION 4 — FLEET DIAGNOSTIC
-# =====================================================================================
 def diagnose_fleet(df: pd.DataFrame, cfg: ZoningConfig) -> pd.DataFrame:
     output_rows = []
     if df.empty:
@@ -243,13 +237,21 @@ def diagnose_fleet(df: pd.DataFrame, cfg: ZoningConfig) -> pd.DataFrame:
     out_df = pd.DataFrame(output_rows)
     return out_df.sort_values("โหลดสูงสุด/วัน", ascending=False).reset_index(drop=True) if not out_df.empty else out_df
 
-# =====================================================================================
-#  SECTION 5 — UI & GATED STEP-BY-STEP EXECUTION
-# =====================================================================================
-st.title("🚛 Smart Route Rebalancer — Enterprise v6.3")
-st.markdown("<div style='color:#64748B; font-weight:600; margin-bottom:1rem;'>ระบบวิเคราะห์และตัดสายส่งน้ำอัตโนมัติ (Step-by-Step Enterprise Edition)</div>", unsafe_allow_html=True)
+def reset_results():
+    for k in ('result', 'zoning_cfg_used'):
+        st.session_state.pop(k, None)
 
-# --- STEP 1: LOAD DATA ---
+def show_loader(placeholder, msg: str):
+    html = f'<div style="text-align:center; padding:2rem; color:#0284C7; font-weight:bold; font-size:1.2rem; border-radius:12px; background:#FFFFFF; border:1px solid #E2E8F0;">{msg}</div>'
+    placeholder.markdown(html, unsafe_allow_html=True)
+
+# =====================================================================================
+#  UI & STRICT GATED FLOW EXECUTION
+# =====================================================================================
+st.title("🚛 Smart Route Rebalancer — Enterprise v7.0")
+st.markdown("<div style='color:#64748B; font-weight:600; margin-bottom:1rem;'>ระบบวิเคราะห์และตัดสายส่งน้ำอัตโนมัติ (Strict Gated Step-by-Step)</div>", unsafe_allow_html=True)
+
+# --- STAGE 1: LOAD SHEET DATA ONLY ---
 st.sidebar.markdown("### 📁 1. นำเข้าข้อมูลบริษัท")
 sheet_url = st.sidebar.text_input("🔗 ลิงก์ Google Sheets:", value="https://docs.google.com/spreadsheets/d/1PqliJwDoK27SCAj2nlcwkeHmDOdKEQqVcpUaRnQaTWc/edit?usp=sharing", placeholder="วางลิงก์ที่นี่...")
 raw_gid = st.sidebar.text_input("แท็บชีต (GID):", value="0")
@@ -293,7 +295,7 @@ if df_raw is None or df_raw.empty:
 df_raw = df_raw.copy()
 cols = df_raw.columns.tolist()
 
-# --- STEP 2: SELECT DEPOTS FIRST (MANDATORY BEFORE MAPPING) ---
+# --- STAGE 2: SELECT DEPOT / BRANCH FIRST (STRICT GATE) ---
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🏢 2. เลือกคลัง/สาขา (เลือกได้หลายสาขา)")
 
@@ -302,17 +304,22 @@ selected_depots = []
 
 if depot_col_guess and depot_col_guess in df_raw.columns:
     all_depots = sorted(df_raw[depot_col_guess].dropna().astype(str).unique().tolist())
-    selected_depots = st.sidebar.multiselect("เลือกสาขาที่ต้องการทำสายส่ง:", options=all_depots, default=all_depots[:1] if all_depots else [], on_change=reset_results)
-    if selected_depots:
-        df = df_raw[df_raw[depot_col_guess].astype(str).str.strip().isin(selected_depots)].reset_index(drop=True)
-    else:
-        df = df_raw.copy()
+    selected_depots = st.sidebar.multiselect("เลือกสาขาที่ต้องการทำสายส่ง:", options=all_depots, default=[], on_change=reset_results)
 else:
-    df = df_raw.copy()
+    st.sidebar.warning("⚠️ ไม่พบคอลัมน์คลัง/สาขาในชีต กรุณาตรวจสอบหัวตาราง")
+    all_depots = []
 
-# --- STEP 3: COLUMN MAPPING UI ---
+# 🛑 STRICT GATE: หยุดรอจนกว่าผู้ใช้จะเลือกสาขา ถึงจะให้ทำขั้นตอนต่อไป
+if not selected_depots:
+    st.warning("🛑 กรุณาเลือก 'คลัง/สาขา' ที่แถบเมนูด้านซ้ายอย่างน้อย 1 สาขา เพื่อดำเนินการต่อ")
+    st.stop()
+
+# กรองข้อมูลเฉพาะสาขาที่ถูกเลือก
+df = df_raw[df_raw[depot_col_guess].astype(str).str.strip().isin(selected_depots)].reset_index(drop=True)
+
+# --- STAGE 3: COLUMN MAPPING & CONFIG AFTER DEPOT SELECTED ---
 st.sidebar.markdown("---")
-st.sidebar.markdown("### 🧭 3. ยืนยันคอลัมน์ข้อมูลจากชีต")
+st.sidebar.markdown("### 🧭 3. ยืนยันคอลัมน์ข้อมูลจากสาขาที่เลือก")
 def sel(label, keys, allow_none=False):
     g = guess_col(keys, cols, allow_none=allow_none)
     if allow_none:
@@ -331,7 +338,6 @@ id_col = sel("คอลัมน์รหัสสมาชิก:", ['รหั
 vip_col = sel("คอลัมน์สถานะ (VIP/ปกติ):", ['สถานะ', 'vip'], allow_none=True)
 name_col = sel("คอลัมน์ชื่อลูกค้า:", ['ชื่อ', 'name'], allow_none=True)
 
-# Auto-extract Lat, Lon
 def split_lat_lon(val):
     try:
         parts = str(val).split(',')
@@ -399,7 +405,7 @@ active_trucks = kept_trucks + new_trucks
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🎛️ 7. เป้าหมายรายคัน (%)")
-depot_fp_key = ",".join(sorted(selected_depots)) if selected_depots else "all"
+depot_fp_key = ",".join(sorted(selected_depots))
 fingerprint = "|".join([sheet_url, sheet_gid, depot_fp_key, vol_col, truck_col, day_col, str(sorted(dissolve_trucks)), str(sorted(relieve_trucks)), str(new_trucks), str(sorted(exclude_trucks)), f"{monthly_cap}", f"{daily_cap}", f"{depot_lat}", f"{depot_lon}"])
 
 if st.sidebar.button("🔄 คำนวณเป้าหมายอัตโนมัติ"):
@@ -465,7 +471,7 @@ if st.sidebar.button("🚀 ประมวลผลจัดสายส่ง�
     ph.empty()
 
 # =====================================================================================
-#  SECTION 10 — TABS UI & DASHBOARD
+#  DASHBOARD TABS UI
 # =====================================================================================
 tab1, tab2, tab3 = st.tabs([
     "📊 1. ภาพรวมและวินิจฉัย (Dashboard)", 
@@ -473,7 +479,7 @@ tab1, tab2, tab3 = st.tabs([
     "📋 3. ตารางโหลดรายวันและรายละเอียด (Reports)"
 ])
 
-depot_label_text = ", ".join(selected_depots) if selected_depots else "ทั้งหมด (All Depots)"
+depot_label_text = ", ".join(selected_depots)
 
 with tab1:
     st.markdown(f"### 📈 ตัวชี้วัดผลลัพธ์เพื่อการตัดสินใจ (สาขา: {depot_label_text})")
@@ -507,7 +513,7 @@ with tab1:
             render_enterprise_metric("ยอดส่วนเกินที่ต้องย้าย", f"{excess_total:,.0f} ถัง/เดือน", status="warning" if excess_total > 0 else "good")
 
     st.markdown("---")
-    st.markdown("### 🩺 ผลวินิจฉัยสถานะรถปัจจุบัน (ก่อนปรับ)")
+    st.markdown(f"### 🩺 ผลวินิจฉัยสถานะรถปัจจุบัน (สาขา: {depot_label_text})")
     diag_html = '<div class="custom-table-container"><table class="custom-table"><thead><tr><th>เบอร์รถ</th><th>จำนวนลูกค้า</th><th>ยอด/เดือน</th><th>ภาระงาน(%)</th><th>โหลดสูงสุด/วัน</th><th>จุดจอด</th><th>ส่วนเกิน/วัน</th><th>สถานะ</th></tr></thead><tbody>'
     for _, row in diag.iterrows():
         is_over = "🔴 เกินเพดาน" in str(row['สถานะ'])

@@ -1,12 +1,9 @@
 # =====================================================================================
-#  SMART ROUTE REBALANCER — TERRITORY-AWARE ENTERPRISE EDITION v11.0
-#  หลักการ:
-#  1. รถที่ยุบ (dissolve) → งานทั้งหมดไปสร้างรถใหม่
-#  2. รถที่แบ่งเบาภาระ (relieve) → เก็บพื้นที่เดิมไว้ ตัดเฉพาะส่วนเกินที่ขอบเขต
-#  3. รถปกติ → ไม่ยุ่ง
-#  4. ทุกคันต้องวิ่งเป็นกลุ่มเดียวกัน (contiguous territory)
-#  5. เส้นทางคิดจากถนนจริงผ่าน OSRM (fallback เป็น Haversine)
-#  6. แผนที่ก่อน/หลัง sync กัน และเน้นแสดงจุดรับเป็นหลัก
+#  SMART ROUTE REBALANCER — TERRITORY-AWARE ENTERPRISE EDITION v11.1
+#  ปรับปรุง:
+#  1. เกลี่ยงานสองทิศทาง: รถ relieve ส่งส่วนเกิน → 13208 และ 13208 ส่งส่วนเกินกลับ → รถว่าง
+#  2. ยึดพื้นที่ 13S01 เป็นหลัก แต่ขอบเขตใกล้รถอื่นให้รถนั้นรับ
+#  3. แสดงตารางรายละเอียดสมาชิกต่อรถ
 # =====================================================================================
 
 import math
@@ -23,7 +20,7 @@ import requests
 
 # --- PAGE CONFIG ---
 st.set_page_config(
-    page_title="Smart Route Rebalancer v11.0 — Territory Aware",
+    page_title="Smart Route Rebalancer v11.1 — Territory Aware",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -62,8 +59,8 @@ for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-st.title("🚛 Smart Route Rebalancer v11.0 — Territory Aware")
-st.markdown("<div style='color:#64748B; font-weight:600; margin-bottom:1.5rem;'>ระบบเกลี่ยสายส่งน้ำอัจฉริยวิธี ยึดพื้นที่เดิม + ถนนจริง + Sync แผนที่</div>", unsafe_allow_html=True)
+st.title("🚛 Smart Route Rebalancer v11.1 — Territory Aware")
+st.markdown("<div style='color:#64748B; font-weight:600; margin-bottom:1.5rem;'>ระบบเกลี่ยสายส่งน้ำอัจฉริยวิธี ยึดพื้นที่เดิม + ถนนจริง + Sync แผนที่ + เกลี่ยสมดุล</div>", unsafe_allow_html=True)
 
 # =====================================================================================
 # STEP 1: LOAD DATA
@@ -167,6 +164,9 @@ id_col = st.sidebar.selectbox("🆔 รหัสสมาชิก:", cols, inde
 name_col_options = ["-- ไม่มี --"] + cols
 name_col_sel = st.sidebar.selectbox("👤 ชื่อลูกค้า (ถ้ามี):", name_col_options, index=0)
 name_col = None if name_col_sel == "-- ไม่มี --" else name_col_sel
+group_col_options = ["-- ไม่มี --"] + cols
+group_col_sel = st.sidebar.selectbox("👥 กลุ่มลูกค้า (ถ้ามี):", group_col_options, index=0)
+group_col = None if group_col_sel == "-- ไม่มี --" else group_col_sel
 
 # =====================================================================================
 # DATA CLEANING
@@ -211,6 +211,17 @@ def fmt_int(v):
     except Exception:
         return "0"
 
+def fmt_float1(v):
+    try:
+        if pd.isna(v):
+            return "0.0"
+        f = float(v)
+        if math.isnan(f):
+            return "0.0"
+        return f"{f:.1f}"
+    except Exception:
+        return "0.0"
+
 coords = df_filtered[gps_col].apply(parse_lat_lon)
 df_filtered["_lat"] = [c[0] for c in coords]
 df_filtered["_lon"] = [c[1] for c in coords]
@@ -231,12 +242,17 @@ if df_filtered.empty:
 st.sidebar.markdown("---")
 st.sidebar.markdown("## 4️⃣ ควบคุมเพดานและเกลี่ยงาน")
 
-daily_cap = st.sidebar.number_input("เพดานโหลด/วัน (ถัง):", 50.0, 500.0, 156.0, 1.0)
+daily_cap = st.sidebar.number_input("เพดานโหลด/วัน (ถัง):", 50.0, 800.0, 156.0, 1.0)
 monthly_cap = st.sidebar.number_input("ความจุ/เดือน (ถัง):", 1000.0, 20000.0, 4160.0, 40.0)
 contiguity_threshold_km = st.sidebar.slider(
     "ระยะเชื่อมกลุ่มจุด (km):", 0.5, 5.0, 2.0, 0.5,
     help="ถ้าจุดรับห่างกันไม่เกินระยะนี้ ถือว่าอยู่ในกลุ่มเดียวกัน"
 )
+
+balance_tolerance = st.sidebar.slider(
+    "ความยืดหยุ่นเพดาน (%):", 0, 20, 2, 1,
+    help="อนุญาตให้เกิน/ต่ำกว่าเพดานได้กี่เปอร์เซ็นต์"
+) / 100.0
 
 osrm_url = st.sidebar.text_input(
     "🌐 OSRM Server URL:", value=OSRM_PUBLIC_URL,
@@ -261,11 +277,11 @@ if not available_trucks:
 processable = available_trucks.copy()
 
 st.sidebar.markdown("#### 🗑️ ยุบรถ (Dissolve)")
-st.sidebar.caption("รถที่เลือกจะถูกยุบ และงานทั้งหมดจะย้ายไปรถใหม่")
+st.sidebar.caption("รถที่เลือกจะถูกยุบ และงานทั้งหมดจะย้ายไปรถใหม่เป็นหลัก")
 dissolve_trucks = st.sidebar.multiselect("เลือกรถที่จะยุบ:", options=processable, default=[])
 
 st.sidebar.markdown("#### ✂️ แบ่งเบาภาระ (Relieve)")
-st.sidebar.caption("รถที่เลือกจะเก็บพื้นที่เดิมไว้ แต่ตัดส่วนเกินที่ขอบเขตออกไปให้รถใหม่")
+st.sidebar.caption("รถที่เลือกจะเก็บพื้นที่เดิมไว้ ตัดเฉพาะส่วนเกินที่ขอบเขตออกไปให้รถใหม่")
 relieve_trucks = st.sidebar.multiselect(
     "เลือกรถที่จะตัดงานออก:", options=[t for t in processable if t not in dissolve_trucks], default=[]
 )
@@ -291,11 +307,7 @@ def haversine_km(lat1, lon1, lat2, lon2):
 
 @st.cache_data(ttl=600, show_spinner=False)
 def get_osrm_route(coords: List[Tuple[float, float]], osrm_base: str) -> Optional[Dict]:
-    """
-    ขอเส้นทางถนนจริงจาก OSRM สำหรับลำดับจุดที่กำหนด
-    coords: list of (lat, lon)
-    return: {distance_km, duration_min, points: list of [lat, lon]}
-    """
+    """ขอเส้นทางถนนจริงจาก OSRM"""
     if len(coords) < 2:
         return None
     try:
@@ -312,14 +324,14 @@ def get_osrm_route(coords: List[Tuple[float, float]], osrm_base: str) -> Optiona
         points = [[c[1], c[0]] for c in geometry]
         return {
             "distance_km": route["distance"] / 1000.0,
-            "duration_min": route["duration"] / 60.0,
+            "duration_min": route["duration_min"] / 60.0,
             "points": points
         }
     except Exception:
         return None
 
 def compute_medoid(points: np.ndarray) -> Tuple[float, float]:
-    """หาจุดศูนย์กลางที่ลดระยะทางเส้นตรงรวมน้อยที่สุด (geometric medoid)"""
+    """หาจุดศูนย์กลางที่ลดระยะทางเส้นตรงรวมน้อยที่สุด"""
     if len(points) == 0:
         return 0.0, 0.0
     if len(points) == 1:
@@ -337,9 +349,7 @@ def compute_medoid(points: np.ndarray) -> Tuple[float, float]:
     return float(points[best_i][0]), float(points[best_i][1])
 
 def connected_components(points: np.ndarray, threshold_km: float) -> List[List[int]]:
-    """
-    แบ่งจุดรับเป็นกลุ่มที่เชื่อมต่อกันตามระยะห่าง <= threshold_km
-    """
+    """แบ่งจุดรับเป็นกลุ่มที่เชื่อมต่อกันตามระยะห่าง <= threshold_km"""
     n = len(points)
     if n == 0:
         return []
@@ -404,8 +414,7 @@ def get_point_sequence(df_sub: pd.DataFrame) -> pd.DataFrame:
 def territory_boundary_points(df_sub: pd.DataFrame, toward_medoid: Tuple[float, float]) -> pd.DataFrame:
     """
     ให้คะแนนจุดรับว่าอยู่ที่ขอบเขตด้านใด:
-    - ใกล้ medoid ของรถใหม่มาก = น่าตัดมาก
-    - ไกลจาก centroid ของรถตัวเอง = น่าตัดมาก
+    ใกล้ medoid ของรถใหม่มาก = น่าตัดมาก
     """
     if df_sub.empty:
         return df_sub
@@ -421,8 +430,21 @@ def territory_boundary_points(df_sub: pd.DataFrame, toward_medoid: Tuple[float, 
     df_sub["_boundary_score"] = scores
     return df_sub
 
+def points_far_from_medoid(df_sub: pd.DataFrame, from_medoid: Tuple[float, float]) -> pd.DataFrame:
+    """หาจุดที่ไกลจาก medoid ของตัวเองมากที่สุด (สำหรับดันกลับออกไป)"""
+    if df_sub.empty:
+        return df_sub
+    pts = df_sub[["_lat", "_lon"]].to_numpy()
+    scores = []
+    for lat, lon in pts:
+        d = haversine_km(lat, lon, from_medoid[0], from_medoid[1])
+        scores.append(d)
+    df_sub = df_sub.copy()
+    df_sub["_out_score"] = scores
+    return df_sub
+
 def auto_new_truck_name(dissolve_trucks: List[str]) -> str:
-    """สร้างชื่อรถใหม่อัตโนมัติจากรถที่ยุบ เช่น 13S01 → 13208"""
+    """สร้างชื่อรถใหม่อัตโนมัติจากรถที่ยุบ"""
     if not dissolve_trucks:
         return "NEW01"
     base = dissolve_trucks[0].upper()
@@ -438,20 +460,20 @@ def rebalance_territory(
     truck_col: str,
     id_col: str,
     daily_cap: float,
+    balance_tolerance: float,
     contiguity_km: float
 ) -> pd.DataFrame:
     """
-    Territory-Aware Rebalancing:
+    Territory-Aware Rebalancing แบบสองทิศทาง:
     1. รถ dissolve → ย้ายทั้งหมดไปรถใหม่
-    2. รถ relieve → ตัดส่วนเกินจากขอบเขตที่ใกล้รถใหม่
-    3. รถปกติ → คงเดิม
+    2. รถ relieve ที่เกินเพดาน → ตัดส่วนเกินที่ขอบเขตให้รถใหม่
+    3. รถใหม่ที่เกินเพดาน → ดันขอบเขตที่ไกลจากศูนย์กลางไปให้รถที่ว่างกำลัง
     4. ตรวจ contiguity ทุกครั้งหลังย้าย
     """
     res = df.copy()
     res['เบอร์รถใหม่'] = res[truck_col].astype(str)
     res['สถานะ'] = 'คงเดิม'
 
-    # สร้างชื่อรถใหม่
     if not new_trucks and dissolve_trucks:
         new_trucks = [auto_new_truck_name(dissolve_trucks)]
 
@@ -461,6 +483,16 @@ def rebalance_territory(
 
     new_truck_id = new_trucks[0]
 
+    def truck_load(t):
+        sub = res[res['เบอร์รถใหม่'] == t]
+        return sub['_vol_daily'].sum() / WORKING_DAYS if not sub.empty else 0.0
+
+    def truck_medoid(t):
+        sub = res[res['เบอร์รถใหม่'] == t]
+        if sub.empty:
+            return None
+        return compute_medoid(sub[["_lat", "_lon"]].to_numpy())
+
     # 1. ยุบรถ dissolve ไปรถใหม่
     if dissolve_trucks:
         mask = res[truck_col].isin(dissolve_trucks)
@@ -468,46 +500,77 @@ def rebalance_territory(
         res.loc[mask, 'สถานะ'] = 'ยุบรถ → รถใหม่'
 
     # 2. หา medoid ของรถใหม่
-    new_truck_df = res[res['เบอร์รถใหม่'] == new_truck_id]
-    if new_truck_df.empty:
+    new_medoid = truck_medoid(new_truck_id)
+    if new_medoid is None:
         relieve_df = res[res[truck_col].isin(relieve_trucks)]
         if relieve_df.empty:
             st.error("❌ ไม่พบข้อมูลสำหรับสร้างพื้นที่รถใหม่")
             st.stop()
         new_medoid = compute_medoid(relieve_df[["_lat", "_lon"]].to_numpy())
-    else:
-        new_medoid = compute_medoid(new_truck_df[["_lat", "_lon"]].to_numpy())
 
-    # 3. ตัดส่วนเกินจากรถ relieve
+    # 3. ตัดส่วนเกินจากรถ relieve ไปรถใหม่
     for rt in relieve_trucks:
-        sub = res[res['เบอร์รถใหม่'] == rt].copy()
-        if sub.empty:
-            continue
-
-        current_load = sub['_vol_daily'].sum() / WORKING_DAYS
-        excess = max(0.0, current_load - daily_cap)
-
-        if excess <= 0:
-            continue
-
-        sub = territory_boundary_points(sub, new_medoid)
-        sub = sub.sort_values('_boundary_score', ascending=True)
-
-        moved_ids = []
-        moved_load = 0.0
-        for _, row in sub.iterrows():
-            if moved_load >= excess:
+        max_iter = 500
+        for _ in range(max_iter):
+            current_load = truck_load(rt)
+            if current_load <= daily_cap * (1 + balance_tolerance):
                 break
-            if str(row[id_col]) in manual_vips:
-                continue
-            moved_ids.append(row[id_col])
-            moved_load += float(row['_vol_daily']) / WORKING_DAYS
+            sub = res[(res['เบอร์รถใหม่'] == rt) & (~res[id_col].isin(manual_vips))].copy()
+            if sub.empty:
+                break
+            sub = territory_boundary_points(sub, new_medoid)
+            sub = sub.sort_values('_boundary_score', ascending=True)
+            move_id = sub.iloc[0][id_col]
+            res.loc[res[id_col] == move_id, 'เบอร์รถใหม่'] = new_truck_id
+            res.loc[res[id_col] == move_id, 'สถานะ'] = 'แบ่งเบาภาระ → รถใหม่'
 
-        if moved_ids:
-            res.loc[res[id_col].isin(moved_ids), 'เบอร์รถใหม่'] = new_truck_id
-            res.loc[res[id_col].isin(moved_ids), 'สถานะ'] = 'แบ่งเบาภาระ → รถใหม่'
+    # 4. เกลี่ยรถใหม่ที่เกินเพดาน กลับไปให้รถที่ว่างกำลัง
+    # ยึดว่าต้องเก็บพื้นที่ 13S01 ไว้กับรถใหม่มากที่สุด ดังนั้นจะดันเฉพาะขอบเขตที่ไกลจากศูนย์กลางรถใหม่
+    other_trucks = [t for t in res['เบอร์รถใหม่'].unique() if t != new_truck_id]
 
-    # 4. ตรวจ contiguity ของทุกรถ
+    max_iter = 1000
+    for _ in range(max_iter):
+        new_load = truck_load(new_truck_id)
+        if new_load <= daily_cap * (1 + balance_tolerance):
+            break
+
+        # หาจุดที่ไกลจากศูนย์กลางรถใหม่ และอยู่ใกล้รถอื่นที่ว่างกำลัง
+        sub = res[(res['เบอร์รถใหม่'] == new_truck_id) & (~res[id_col].isin(manual_vips))].copy()
+        if sub.empty:
+            break
+
+        sub = points_far_from_medoid(sub, new_medoid)
+        sub = sub.sort_values('_out_score', ascending=False)
+
+        best_move = None
+        best_score = float('inf')
+
+        for _, row in sub.iterrows():
+            for ot in other_trucks:
+                ot_load = truck_load(ot)
+                if ot_load >= daily_cap * (1 + balance_tolerance):
+                    continue
+                ot_medoid = truck_medoid(ot)
+                if ot_medoid is None:
+                    continue
+                d_to_ot = haversine_km(row['_lat'], row['_lon'], ot_medoid[0], ot_medoid[1])
+                # ดันไปให้รถที่ว่างกำลังมาก และใกล้ที่สุด
+                remaining = daily_cap * (1 + balance_tolerance) - ot_load
+                score = d_to_ot - 3.0 * remaining
+                if score < best_score:
+                    best_score = score
+                    best_move = (row[id_col], ot)
+            if best_move is not None:
+                # เอาเฉพาะจุดที่ดีที่สุดจุดแรกพอ
+                break
+
+        if best_move is None:
+            break
+        move_id, target_truck = best_move
+        res.loc[res[id_col] == move_id, 'เบอร์รถใหม่'] = target_truck
+        res.loc[res[id_col] == move_id, 'สถานะ'] = 'เกลี่ยจากรถใหม่ → รถอื่น'
+
+    # 5. ตรวจ contiguity ของทุกรถ
     for t in res['เบอร์รถใหม่'].unique():
         sub = res[res['เบอร์รถใหม่'] == t]
         pts = sub[["_lat", "_lon"]].to_numpy()
@@ -518,10 +581,11 @@ def rebalance_territory(
             all_indices = sub.index.tolist()
             orphan_indices = [i for i in all_indices if i not in main_indices]
             if orphan_indices:
+                # ย้ายกลุ่มย่อยไปรถใหม่ เพื่อรักษาพื้นที่หลักของรถนั้น
                 res.loc[orphan_indices, 'เบอร์รถใหม่'] = new_truck_id
                 res.loc[orphan_indices, 'สถานะ'] = 'แก้กลุ่มแตก → รถใหม่'
 
-    # 5. เรียงลำดับจุดรับ
+    # 6. เรียงลำดับจุดรับ
     final_dfs = []
     for t in res['เบอร์รถใหม่'].unique():
         sub = res[res['เบอร์รถใหม่'] == t].copy()
@@ -536,9 +600,7 @@ def rebalance_territory(
 # =====================================================================================
 def render_sync_maps(before_df, after_df, route_info, id_col, truck_col, name_col,
                      lat_m, lon_m, new_truck_id):
-    """
-    สร้าง HTML ที่มี Leaflet แผนที่ 2 อัน ซิงค์ zoom/pan กัน
-    """
+    """สร้าง HTML ที่มี Leaflet แผนที่ 2 อัน ซิงค์ zoom/pan กัน"""
     palette = [
         '#0284C7', '#DC2626', '#16A34A', '#F59E0B', '#8B5CF6',
         '#EC4899', '#10B981', '#6366F1', '#84CC16', '#F97316',
@@ -644,7 +706,6 @@ def render_sync_maps(before_df, after_df, route_info, id_col, truck_col, name_co
             beforeMap.on('moveend zoomend', () => sync(beforeMap, afterMap));
             afterMap.on('moveend zoomend', () => sync(afterMap, beforeMap));
             
-            // Before points grouped by truck
             const beforeGroups = {{}};
             data.before_points.forEach(p => {{
                 if (!beforeGroups[p.truck]) beforeGroups[p.truck] = [];
@@ -661,7 +722,6 @@ def render_sync_maps(before_df, after_df, route_info, id_col, truck_col, name_co
                 layer.addTo(beforeMap);
             }});
             
-            // After points + routes
             const afterGroups = {{}};
             data.after_points.forEach(p => {{
                 if (!afterGroups[p.truck]) afterGroups[p.truck] = [];
@@ -688,7 +748,6 @@ def render_sync_maps(before_df, after_df, route_info, id_col, truck_col, name_co
                 layer.addTo(afterMap);
             }});
             
-            // Legend
             const legend = document.getElementById('legend-after');
             const title = document.createElement('div');
             title.style.fontWeight = 'bold';
@@ -730,14 +789,16 @@ if st.sidebar.button("🚀 รันระบบวิเคราะห์แ�
             truck_col,
             id_col,
             daily_cap,
+            balance_tolerance,
             contiguity_threshold_km
         )
 
-        new_truck_id = res_df['เบอร์รถใหม่'].iloc[0] if not res_df.empty else None
-        # หา new_truck_id จริงจากรถที่มีสถานะยุบรถ
+        new_truck_id = None
         dissolve_status = res_df[res_df['สถานะ'].str.contains('ยุบรถ', na=False)]
         if not dissolve_status.empty:
             new_truck_id = dissolve_status['เบอร์รถใหม่'].iloc[0]
+        else:
+            new_truck_id = res_df['เบอร์รถใหม่'].iloc[0] if not res_df.empty else None
 
         # คำนวณเส้นทางถนนจริง
         route_info = {}
@@ -793,7 +854,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-tab1, tab2, tab3 = st.tabs(["📊 ภาพรวม", "🗺️ แผนที่ก่อน/หลัง", "📋 รายงาน"])
+tab1, tab2, tab3, tab4 = st.tabs(["📊 ภาพรวม", "🗺️ แผนที่ก่อน/หลัง", "📋 รายงาน", "👥 รายละเอียดสมาชิก"])
 
 with tab1:
     c1, c2, c3, c4 = st.columns(4)
@@ -829,7 +890,7 @@ with tab1:
             sub = res['df'][res['df']['เบอร์รถใหม่'] == t]
             m_vol = sub['_vol_monthly'].sum()
             d_peak = sub['_vol_daily'].sum() / WORKING_DAYS
-            status = "🔴 เกินเพดาน" if d_peak > daily_cap else "🟢 เหมาะสม"
+            status = "🔴 เกินเพดาน" if d_peak > daily_cap * (1 + balance_tolerance) else "🟢 เหมาะสม"
             if t == res.get('new_truck_id'):
                 status += " | ⭐ รถใหม่"
             route = res['route_info'].get(t, {})
@@ -878,7 +939,7 @@ with tab3:
         )
         for t, arr in sorted(res['final_daily'].items()):
             max_v = arr.max() if len(arr) else 0
-            cls = "text-danger" if max_v > daily_cap else "text-primary"
+            cls = "text-danger" if max_v > daily_cap * (1 + balance_tolerance) else "text-primary"
             route = res['route_info'].get(t, {})
             dist = route.get('osrm_distance_km', 0)
             row_cells = "".join([f"<td class='{cls}'>{fmt_int(v)}</td>" for v in arr])
@@ -894,6 +955,8 @@ with tab3:
         cols_export = [id_col, vol_col, truck_col, 'เบอร์รถใหม่', day_col, '_lat', '_lon', 'สถานะ']
         if name_col:
             cols_export.insert(1, name_col)
+        if group_col:
+            cols_export.insert(2, group_col)
         export_df = res['df'][cols_export].copy()
         export_df['_lat'] = export_df['_lat'].round(6)
         export_df['_lon'] = export_df['_lon'].round(6)
@@ -901,9 +964,75 @@ with tab3:
         st.download_button(
             "📥 ดาวน์โหลดรายงาน (CSV)",
             csv,
-            "route_rebalance_v11_0.csv",
+            "route_rebalance_v11_1.csv",
             "text/csv",
             use_container_width=True
         )
     else:
         st.info("💡 กรุณากดปุ่ม '🚀 รันระบบวิเคราะห์และจัดสรรเส้นทาง' ที่แถบด้านซ้ายเพื่อดูรายงาน")
+
+with tab4:
+    st.markdown("### 👥 รายละเอียดสมาชิกต่อรถหลังปรับงาน")
+    if st.session_state.result:
+        res = st.session_state.result
+
+        # ตัวเลือกกรองตามรถ
+        all_new_trucks = sorted(res['df']['เบอร์รถใหม่'].unique().tolist())
+        selected_detail_trucks = st.multiselect(
+            "เลือกเบอร์รถที่ต้องการดูรายละเอียด:",
+            options=all_new_trucks,
+            default=all_new_trucks,
+            key="detail_truck_filter"
+        )
+
+        detail_df = res['df'][res['df']['เบอร์รถใหม่'].isin(selected_detail_trucks)].copy()
+
+        # สร้างคอลัมน์สำหรับแสดง
+        detail_cols = {
+            'รหัสสมาชิก': id_col,
+            'ชื่อ-นามสกุล': name_col,
+            'เบอร์รถ (หลังปรับ)': 'เบอร์รถใหม่',
+            'รอบส่งประจำสัปดาห์': day_col,
+            'กลุ่มลูกค้า': group_col,
+            'ยอดส่งเฉลี่ย/วัน (ถัง)': '_vol_daily'
+        }
+
+        display_cols = []
+        final_names = []
+        for label, col in detail_cols.items():
+            if col is not None and col in detail_df.columns:
+                display_cols.append(col)
+                final_names.append(label)
+
+        if display_cols:
+            detail_display = detail_df[display_cols].copy()
+            detail_display.columns = final_names
+            # เรียงตามเบอร์รถ แล้วตามรหัสสมาชิก
+            sort_cols = ['เบอร์รถ (หลังปรับ)', 'รหัสสมาชิก']
+            detail_display = detail_display.sort_values(by=[c for c in sort_cols if c in detail_display.columns]).reset_index(drop=True)
+
+            # สรุปยอดต่อรถ
+            st.markdown("#### 📊 สรุปจำนวนสมาชิกและโหลดต่อรถ")
+            truck_summary = detail_display.groupby('เบอร์รถ (หลังปรับ)').agg({
+                'รหัสสมาชิก': 'count',
+                'ยอดส่งเฉลี่ย/วัน (ถัง)': 'sum'
+            }).reset_index()
+            truck_summary.columns = ['เบอร์รถ (หลังปรับ)', 'จำนวนสมาชิก', 'ยอดรวม/วัน (ถัง)']
+            st.dataframe(truck_summary, use_container_width=True)
+
+            st.markdown("#### 📋 รายชื่อสมาชิก")
+            st.dataframe(detail_display, use_container_width=True)
+
+            # ดาวน์โหลดรายงานสมาชิก
+            csv_detail = detail_display.to_csv(index=False).encode('utf-8-sig')
+            st.download_button(
+                "📥 ดาวน์โหลดรายงานสมาชิก (CSV)",
+                csv_detail,
+                "member_details_v11_1.csv",
+                "text/csv",
+                use_container_width=True
+            )
+        else:
+            st.warning("ไม่พบคอลัมน์ที่จำเป็นสำหรับแสดงรายละเอียดสมาชิก")
+    else:
+        st.info("💡 กรุณากดปุ่ม '🚀 รันระบบวิเคราะห์และจัดสรรเส้นทาง' ที่แถบด้านซ้ายเพื่อดูรายละเอียดสมาชิก")

@@ -98,6 +98,7 @@ if st.sidebar.button("📥 โหลดข้อมูลจากชีต", us
             st.session_state.df_raw = None
         else:
             st.session_state.df_raw = df_load
+            st.session_state.result = None
             st.toast("✅ โหลดข้อมูลสำเร็จ!")
 
 if st.session_state.df_raw is None:
@@ -157,23 +158,44 @@ name_col = None if name_col_sel == "-- ไม่มี --" else name_col_sel
 
 # ทำความสะอาดข้อมูล
 def parse_lat_lon(val):
+    if pd.isna(val):
+        return np.nan, np.nan
     try:
         p = str(val).split(',')
         if len(p) >= 2:
-            return float(p[0].strip()), float(p[1].strip())
-    except:
+            lat = float(p[0].strip())
+            lon = float(p[1].strip())
+            if math.isnan(lat) or math.isnan(lon):
+                return np.nan, np.nan
+            return lat, lon
+    except Exception:
         pass
     return np.nan, np.nan
 
 def parse_vol(val):
+    if pd.isna(val):
+        return 0.0
     s = str(val).strip()
     m = re.search(r'avg\s*=\s*(\d+(?:\.\d+)?)', s, re.IGNORECASE)
     if m:
-        return float(m.group(1))
+        v = float(m.group(1))
+        return 0.0 if math.isnan(v) else v
     try:
-        return float(s)
-    except:
+        v = float(s)
+        return 0.0 if math.isnan(v) else v
+    except Exception:
         return 0.0
+
+def fmt_int(v):
+    try:
+        if pd.isna(v):
+            return "0"
+        f = float(v)
+        if math.isnan(f):
+            return "0"
+        return f"{int(round(f))}"
+    except Exception:
+        return "0"
 
 coords = df_filtered[gps_col].apply(parse_lat_lon)
 df_filtered["_lat"] = [c[0] for c in coords]
@@ -194,9 +216,15 @@ st.sidebar.markdown("## 4️⃣ ควบคุมเพดานและเก
 daily_cap = st.sidebar.number_input("เพดานโหลด/วัน (ถัง):", 50.0, 500.0, 156.0, 1.0)
 monthly_cap = st.sidebar.number_input("ความจุ/เดือน (ถัง):", 1000.0, 20000.0, 4160.0, 40.0)
 
+available_trucks_all = sorted(df_filtered[truck_col].unique().tolist())
+exclude_trucks = st.sidebar.multiselect("🚫 ล็อกรถห้ามยุ่ง:", options=available_trucks_all, default=[])
+
+# กรองรถที่ห้ามยุ่งออกจากข้อมูลทั้งหมด เพื่อให้แผนที่/ตาราง/การคำนวณเบาขึ้น
+if exclude_trucks:
+    df_filtered = df_filtered[~df_filtered[truck_col].isin(exclude_trucks)].reset_index(drop=True)
+
 available_trucks = sorted(df_filtered[truck_col].unique().tolist())
-exclude_trucks = st.sidebar.multiselect("🚫 ล็อกรถห้ามยุ่ง:", options=available_trucks, default=[])
-processable = [t for t in available_trucks if t not in exclude_trucks]
+processable = available_trucks.copy()
 dissolve_trucks = st.sidebar.multiselect("🗑️ ยุบสายทั้งคัน:", options=processable, default=[])
 relieve_trucks = st.sidebar.multiselect("✂️ ดึงงานออกบางส่วน:", options=[t for t in processable if t not in dissolve_trucks], default=[])
 
@@ -243,16 +271,23 @@ if st.sidebar.button("🚀 รันระบบวิเคราะห์แ�
 # =====================================================================================
 # MAIN DASHBOARD
 # =====================================================================================
-st.markdown(f"### 📍 สาขาที่เลือก: <span style='color:#0284C7;'>{depot_label}</span> &nbsp;|&nbsp; ข้อมูลทั้งหมด <span style='color:#0284C7;'>{len(df_filtered):,}</span> รายการ", unsafe_allow_html=True)
+st.markdown(
+    f"### 📍 สาขาที่เลือก: <span style='color:#0284C7;'>{depot_label}</span> &nbsp;|&nbsp; ข้อมูลทั้งหมด <span style='color:#0284C7;'>{len(df_filtered):,}</span> รายการ",
+    unsafe_allow_html=True
+)
 
 tab1, tab2, tab3 = st.tabs(["📊 ภาพรวม", "🗺️ แผนที่", "📋 รายงาน"])
 
 with tab1:
     c1, c2, c3, c4 = st.columns(4)
-    with c1: st.markdown(f"<div class='card'><h4>รถในสาขา</h4><h2>{len(available_trucks)} คัน</h2></div>", unsafe_allow_html=True)
-    with c2: st.markdown(f"<div class='card'><h4>ลูกค้าในสาขา</h4><h2>{len(df_filtered):,} ราย</h2></div>", unsafe_allow_html=True)
-    with c3: st.markdown(f"<div class='card'><h4>ยอดรวมสาขา</h4><h2>{df_filtered['_vol_monthly'].sum():,.0f} ถัง</h2><span>ต่อเดือน</span></div>", unsafe_allow_html=True)
-    with c4: st.markdown(f"<div class='card'><h4>เพดานควบคุม</h4><h2 class='text-danger'>{daily_cap:,.0f} ถัง</h2><span>ต่อวัน/คัน</span></div>", unsafe_allow_html=True)
+    with c1:
+        st.markdown(f"<div class='card'><h4>รถในสาขา</h4><h2>{len(available_trucks)} คัน</h2></div>", unsafe_allow_html=True)
+    with c2:
+        st.markdown(f"<div class='card'><h4>ลูกค้าในสาขา</h4><h2>{len(df_filtered):,} ราย</h2></div>", unsafe_allow_html=True)
+    with c3:
+        st.markdown(f"<div class='card'><h4>ยอดรวมสาขา</h4><h2>{df_filtered['_vol_monthly'].sum():,.0f} ถัง</h2><span>ต่อเดือน</span></div>", unsafe_allow_html=True)
+    with c4:
+        st.markdown(f"<div class='card'><h4>เพดานควบคุม</h4><h2 class='text-danger'>{daily_cap:,.0f} ถัง</h2><span>ต่อวัน/คัน</span></div>", unsafe_allow_html=True)
     
     st.markdown("#### 🩺 สรุปภาระงานรายคันก่อนปรับ")
     summary = []
@@ -260,38 +295,106 @@ with tab1:
         m_vol = grp['_vol_monthly'].sum()
         d_peak = grp['_vol_daily'].sum() / WORKING_DAYS
         status = "🔴 เกินเพดาน" if d_peak > daily_cap else "🟢 เหมาะสม"
-        summary.append({"เบอร์รถ": t, "ลูกค้า": len(grp), "ยอด/เดือน": int(m_vol), "โหลดเฉลี่ย/วัน": int(d_peak), "สถานะ": status})
+        summary.append({
+            "เบอร์รถ": t,
+            "ลูกค้า": len(grp),
+            "ยอด/เดือน": int(m_vol),
+            "โหลดเฉลี่ย/วัน": int(d_peak),
+            "สถานะ": status
+        })
     st.dataframe(pd.DataFrame(summary).sort_values("โหลดเฉลี่ย/วัน", ascending=False), use_container_width=True)
 
 with tab2:
-    st.markdown("### 🗺️ แผนที่กระจายลูกค้าในสาขา")
+    st.markdown("### 🗺️ เปรียบเทียบแผนที่ก่อนและหลังปรับ")
+
     if not HAS_FOLIUM:
         st.error("⚠️ ไม่พบไลบรารี folium กรุณาตรวจสอบไฟล์ requirements.txt")
-    elif not df_filtered.empty:
+    elif df_filtered.empty:
+        st.warning("ไม่พบข้อมูลพิกัด")
+    else:
         lat_m = float(df_filtered["_lat"].mean())
         lon_m = float(df_filtered["_lon"].mean())
-        m = folium.Map(location=[lat_m, lon_m], zoom_start=12)
-        for _, r in df_filtered.iterrows():
-            if pd.notna(r["_lat"]) and pd.notna(r["_lon"]):
-                folium.CircleMarker([r["_lat"], r["_lon"]], radius=4, color='#0284C7', fill=True, fill_opacity=0.7, popup=f"รหัส: {r[id_col]}<br>รถ: {r[truck_col]}").add_to(m)
-        components.html(m.get_root().render(), height=700)
-    else:
-        st.warning("ไม่พบข้อมูลพิกัด")
+
+        palette = [
+            '#0284C7', '#DC2626', '#16A34A', '#F59E0B', '#8B5CF6',
+            '#EC4899', '#10B981', '#6366F1', '#84CC16', '#F97316',
+            '#14B8A6', '#A855F7', '#EF4444', '#22C55E', '#3B82F6'
+        ]
+        before_trucks = sorted(df_filtered[truck_col].unique().tolist())
+        after_trucks = sorted(st.session_state.result['df']['เบอร์รถใหม่'].unique().tolist()) if st.session_state.result else []
+        all_trucks = sorted(set(before_trucks + after_trucks))
+        truck_color = {t: palette[i % len(palette)] for i, t in enumerate(all_trucks)}
+
+        col_before, col_after = st.columns(2)
+
+        with col_before:
+            st.markdown("**ก่อนปรับ**")
+            m1 = folium.Map(location=[lat_m, lon_m], zoom_start=12)
+            for _, r in df_filtered.iterrows():
+                if pd.notna(r["_lat"]) and pd.notna(r["_lon"]):
+                    color = truck_color.get(r[truck_col], '#334155')
+                    folium.CircleMarker(
+                        [r["_lat"], r["_lon"]],
+                        radius=4,
+                        color=color,
+                        fill=True,
+                        fill_opacity=0.7,
+                        popup=f"รหัส: {r[id_col]}<br>รถ: {r[truck_col]}"
+                    ).add_to(m1)
+            components.html(m1.get_root().render(), height=500)
+
+        with col_after:
+            st.markdown("**หลังปรับ**")
+            if st.session_state.result:
+                res_df = st.session_state.result['df']
+                m2 = folium.Map(location=[lat_m, lon_m], zoom_start=12)
+                for _, r in res_df.iterrows():
+                    if pd.notna(r["_lat"]) and pd.notna(r["_lon"]):
+                        color = truck_color.get(r['เบอร์รถใหม่'], '#334155')
+                        folium.CircleMarker(
+                            [r["_lat"], r["_lon"]],
+                            radius=4,
+                            color=color,
+                            fill=True,
+                            fill_opacity=0.7,
+                            popup=f"รหัส: {r[id_col]}<br>รถใหม่: {r['เบอร์รถใหม่']}"
+                        ).add_to(m2)
+                components.html(m2.get_root().render(), height=500)
+            else:
+                st.info("💡 กรุณากดปุ่ม '🚀 รันระบบวิเคราะห์และจัดสรรเส้นทาง' เพื่อดูแผนที่หลังปรับ")
 
 with tab3:
     st.markdown("### 📅 ตารางโหลดรายวันและส่งออก")
     if st.session_state.result:
         res = st.session_state.result
-        d_html = "<table class='custom-table'><thead><tr><th>เบอร์รถ</th><th>จันทร์</th><th>อังคาร</th><th>พุธ</th><th>พฤหัสฯ</th><th>ศุกร์</th><th>เสาร์</th><th>โหลดสูงสุด</th></tr></thead><tbody>"
+        d_html = (
+            "<table class='custom-table'>"
+            "<thead><tr><th>เบอร์รถ</th><th>จันทร์</th><th>อังคาร</th><th>พุธ</th>"
+            "<th>พฤหัสฯ</th><th>ศุกร์</th><th>เสาร์</th><th>โหลดสูงสุด</th></tr></thead><tbody>"
+        )
         for t, arr in sorted(res['final_daily'].items()):
-            max_v = arr.max()
+            max_v = arr.max() if len(arr) else 0
             cls = "text-danger" if max_v > daily_cap else "text-primary"
-            d_html += f"<tr><td style='font-weight:700;'>{t}</td>" + "".join([f"<td class='{cls}'>{int(round(v))}</td>" for v in arr]) + f"<td class='{cls}' style='font-weight:700;'>{int(round(max_v))}</td></tr>"
+            row_cells = "".join([f"<td class='{cls}'>{fmt_int(v)}</td>" for v in arr])
+            d_html += (
+                f"<tr><td style='font-weight:700;'>{t}</td>"
+                f"{row_cells}"
+                f"<td class='{cls}' style='font-weight:700;'>{fmt_int(max_v)}</td></tr>"
+            )
         d_html += "</tbody></table>"
         st.markdown(d_html, unsafe_allow_html=True)
         
-        export_df = res['df'][[id_col, name_col, vol_col, truck_col, 'เบอร์รถใหม่', day_col, 'สถานะ']] if name_col else res['df'][[id_col, vol_col, truck_col, 'เบอร์รถใหม่', day_col, 'สถานะ']]
+        cols_export = [id_col, vol_col, truck_col, 'เบอร์รถใหม่', day_col, 'สถานะ']
+        if name_col:
+            cols_export.insert(1, name_col)
+        export_df = res['df'][cols_export]
         csv = export_df.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("📥 ดาวน์โหลดรายงาน (CSV)", csv, "route_rebalance_v10_1.csv", "text/csv", use_container_width=True)
+        st.download_button(
+            "📥 ดาวน์โหลดรายงาน (CSV)",
+            csv,
+            "route_rebalance_v10_1.csv",
+            "text/csv",
+            use_container_width=True
+        )
     else:
         st.info("💡 กรุณากดปุ่ม '🚀 รันระบบวิเคราะห์และจัดสรรเส้นทาง' ที่แถบด้านซ้ายเพื่อดูรายงาน")

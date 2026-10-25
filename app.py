@@ -1,6 +1,6 @@
 # =====================================================================================
-#  SMART ROUTE REBALANCER — MODERN ENTERPRISE EDITION v10.1
-#  Complete Clean Code | Wizard UI | Google Sheets Ready
+#  SMART ROUTE REBALANCER — MODERN ENTERPRISE EDITION v10.2
+#  Complete Clean Code | Wizard UI | Google Sheets Ready | Filtered After Map
 # =====================================================================================
 import math
 import re
@@ -19,7 +19,7 @@ except ImportError:
 
 # --- PAGE CONFIG ---
 st.set_page_config(
-    page_title="Smart Route Rebalancer v10.1",
+    page_title="Smart Route Rebalancer v10.2",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -50,7 +50,7 @@ if 'df_raw' not in st.session_state:
 if 'result' not in st.session_state:
     st.session_state.result = None
 
-st.title("🚛 Smart Route Rebalancer — Enterprise v10.1")
+st.title("🚛 Smart Route Rebalancer — Enterprise v10.2")
 st.markdown("<div style='color:#64748B; font-weight:600; margin-bottom:1.5rem;'>ระบบจัดสรรและเกลี่ยสายส่งน้ำอัจฉริยะ (Step-by-Step Wizard)</div>", unsafe_allow_html=True)
 
 # =====================================================================================
@@ -347,19 +347,58 @@ with tab2:
             st.markdown("**หลังปรับ**")
             if st.session_state.result:
                 res_df = st.session_state.result['df']
+                after_unique_trucks = sorted(res_df['เบอร์รถใหม่'].unique().tolist())
+
+                selected_after_trucks = st.multiselect(
+                    "เลือกคันรถที่ต้องการแสดง:",
+                    options=after_unique_trucks,
+                    default=after_unique_trucks[:3] if len(after_unique_trucks) >= 3 else after_unique_trucks,
+                    key="after_truck_filter"
+                )
+
+                display_df = res_df[res_df['เบอร์รถใหม่'].isin(selected_after_trucks)].copy()
+                display_df = display_df[pd.notna(display_df["_lat"]) & pd.notna(display_df["_lon"])].copy()
+
+                # สร้างลำดับจุดในแต่ละคัน
+                display_df["_seq"] = display_df.groupby("เบอร์รถใหม่").cumcount()
+
                 m2 = folium.Map(location=[lat_m, lon_m], zoom_start=12)
-                for _, r in res_df.iterrows():
-                    if pd.notna(r["_lat"]) and pd.notna(r["_lon"]):
-                        color = truck_color.get(r['เบอร์รถใหม่'], '#334155')
+
+                for truck_id in selected_after_trucks:
+                    sub = display_df[display_df['เบอร์รถใหม่'] == truck_id].sort_values("_seq")
+                    if sub.empty:
+                        continue
+                    color = truck_color.get(truck_id, '#334155')
+                    points = sub[["_lat", "_lon"]].values.tolist()
+
+                    # วาดเส้นเชื่อมจุด
+                    folium.PolyLine(
+                        locations=points,
+                        color=color,
+                        weight=2.5,
+                        opacity=0.7,
+                        popup=f"สายรถ: {truck_id}"
+                    ).add_to(m2)
+
+                    # วาดจุดลูกค้า
+                    for _, r in sub.iterrows():
+                        popup_html = f"รหัส: {r[id_col]}<br>รถใหม่: {truck_id}"
+                        if name_col:
+                            popup_html += f"<br>ชื่อ: {r[name_col]}"
                         folium.CircleMarker(
                             [r["_lat"], r["_lon"]],
                             radius=4,
                             color=color,
                             fill=True,
+                            fill_color=color,
                             fill_opacity=0.7,
-                            popup=f"รหัส: {r[id_col]}<br>รถใหม่: {r['เบอร์รถใหม่']}"
+                            popup=popup_html
                         ).add_to(m2)
+
                 components.html(m2.get_root().render(), height=500)
+
+                if not selected_after_trucks:
+                    st.info("กรุณาเลือกอย่างน้อย 1 คันรถเพื่อแสดงบนแผนที่")
             else:
                 st.info("💡 กรุณากดปุ่ม '🚀 รันระบบวิเคราะห์และจัดสรรเส้นทาง' เพื่อดูแผนที่หลังปรับ")
 
@@ -392,7 +431,7 @@ with tab3:
         st.download_button(
             "📥 ดาวน์โหลดรายงาน (CSV)",
             csv,
-            "route_rebalance_v10_1.csv",
+            "route_rebalance_v10_2.csv",
             "text/csv",
             use_container_width=True
         )

@@ -1,6 +1,6 @@
 # =====================================================================================
-#  SMART ROUTE REBALANCER — MODERN ENTERPRISE EDITION v10.2
-#  Complete Clean Code | Wizard UI | Google Sheets Ready | Filtered After Map
+#  SMART ROUTE REBALANCER — MODERN ENTERPRISE EDITION v10.3
+#  แก้ไขแผนที่หลังปรับ: เลือกแสดงผลได้ | เริ่มต้นเป็นจุดรับ | รวมกลุ่มจุดอัตโนมัติ
 # =====================================================================================
 import math
 import re
@@ -13,13 +13,14 @@ import streamlit.components.v1 as components
 
 try:
     import folium
+    from folium.plugins import MarkerCluster, HeatMap
     HAS_FOLIUM = True
 except ImportError:
     HAS_FOLIUM = False
 
 # --- PAGE CONFIG ---
 st.set_page_config(
-    page_title="Smart Route Rebalancer v10.2",
+    page_title="Smart Route Rebalancer v10.3",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -50,7 +51,7 @@ if 'df_raw' not in st.session_state:
 if 'result' not in st.session_state:
     st.session_state.result = None
 
-st.title("🚛 Smart Route Rebalancer — Enterprise v10.2")
+st.title("🚛 Smart Route Rebalancer — Enterprise v10.3")
 st.markdown("<div style='color:#64748B; font-weight:600; margin-bottom:1.5rem;'>ระบบจัดสรรและเกลี่ยสายส่งน้ำอัจฉริยะ (Step-by-Step Wizard)</div>", unsafe_allow_html=True)
 
 # =====================================================================================
@@ -327,22 +328,34 @@ with tab2:
 
         col_before, col_after = st.columns(2)
 
+        # =============================================================================
+        # แผนที่ก่อนปรับ
+        # =============================================================================
         with col_before:
             st.markdown("**ก่อนปรับ**")
             m1 = folium.Map(location=[lat_m, lon_m], zoom_start=12)
+
+            # รวมจุดที่ซ้อนกันเป็นกลุ่ม
+            cluster_before = MarkerCluster(name="จุดรับก่อนปรับ").add_to(m1)
+
             for _, r in df_filtered.iterrows():
                 if pd.notna(r["_lat"]) and pd.notna(r["_lon"]):
                     color = truck_color.get(r[truck_col], '#334155')
                     folium.CircleMarker(
                         [r["_lat"], r["_lon"]],
-                        radius=4,
+                        radius=3,
                         color=color,
                         fill=True,
-                        fill_opacity=0.7,
+                        fill_color=color,
+                        fill_opacity=0.5,
                         popup=f"รหัส: {r[id_col]}<br>รถ: {r[truck_col]}"
-                    ).add_to(m1)
+                    ).add_to(cluster_before)
+
             components.html(m1.get_root().render(), height=500)
 
+        # =============================================================================
+        # แผนที่หลังปรับ — แก้ไขให้เลือก layer ได้
+        # =============================================================================
         with col_after:
             st.markdown("**หลังปรับ**")
             if st.session_state.result:
@@ -356,44 +369,78 @@ with tab2:
                     key="after_truck_filter"
                 )
 
+                st.markdown("**เลือก Layer ที่ต้องการแสดง:**")
+                c1, c2, c3, c4 = st.columns(4)
+                with c1:
+                    show_points = st.checkbox("จุดรับ", value=True, key="show_points_after")
+                with c2:
+                    show_routes = st.checkbox("เส้นทาง", value=False, key="show_routes_after")
+                with c3:
+                    show_cluster = st.checkbox("รวมกลุ่มจุด", value=True, key="show_cluster_after")
+                with c4:
+                    show_heatmap = st.checkbox("ความหนาแน่น", value=False, key="show_heatmap_after")
+
                 display_df = res_df[res_df['เบอร์รถใหม่'].isin(selected_after_trucks)].copy()
                 display_df = display_df[pd.notna(display_df["_lat"]) & pd.notna(display_df["_lon"])].copy()
-
-                # สร้างลำดับจุดในแต่ละคัน
                 display_df["_seq"] = display_df.groupby("เบอร์รถใหม่").cumcount()
 
                 m2 = folium.Map(location=[lat_m, lon_m], zoom_start=12)
 
-                for truck_id in selected_after_trucks:
-                    sub = display_df[display_df['เบอร์รถใหม่'] == truck_id].sort_values("_seq")
-                    if sub.empty:
-                        continue
-                    color = truck_color.get(truck_id, '#334155')
-                    points = sub[["_lat", "_lon"]].values.tolist()
+                if selected_after_trucks and not display_df.empty:
 
-                    # วาดเส้นเชื่อมจุด
-                    folium.PolyLine(
-                        locations=points,
-                        color=color,
-                        weight=2.5,
-                        opacity=0.7,
-                        popup=f"สายรถ: {truck_id}"
-                    ).add_to(m2)
+                    # --- Layer: จุดรับ ---
+                    if show_points:
+                        if show_cluster:
+                            points_layer = MarkerCluster(name="จุดรับ", show=True).add_to(m2)
+                        else:
+                            points_layer = folium.FeatureGroup(name="จุดรับ", show=True).add_to(m2)
 
-                    # วาดจุดลูกค้า
-                    for _, r in sub.iterrows():
-                        popup_html = f"รหัส: {r[id_col]}<br>รถใหม่: {truck_id}"
-                        if name_col:
-                            popup_html += f"<br>ชื่อ: {r[name_col]}"
-                        folium.CircleMarker(
-                            [r["_lat"], r["_lon"]],
-                            radius=4,
-                            color=color,
-                            fill=True,
-                            fill_color=color,
-                            fill_opacity=0.7,
-                            popup=popup_html
+                        for _, r in display_df.iterrows():
+                            color = truck_color.get(r['เบอร์รถใหม่'], '#334155')
+                            popup_html = f"รหัส: {r[id_col]}<br>รถใหม่: {r['เบอร์รถใหม่']}"
+                            if name_col:
+                                popup_html += f"<br>ชื่อ: {r[name_col]}"
+                            folium.CircleMarker(
+                                [r["_lat"], r["_lon"]],
+                                radius=3,
+                                color=color,
+                                fill=True,
+                                fill_color=color,
+                                fill_opacity=0.5,
+                                popup=popup_html
+                            ).add_to(points_layer)
+
+                    # --- Layer: เส้นทางรถ ---
+                    if show_routes:
+                        routes_layer = folium.FeatureGroup(name="เส้นทางรถ", show=True).add_to(m2)
+                        for truck_id in selected_after_trucks:
+                            sub = display_df[display_df['เบอร์รถใหม่'] == truck_id].sort_values("_seq")
+                            if sub.empty:
+                                continue
+                            color = truck_color.get(truck_id, '#334155')
+                            points = sub[["_lat", "_lon"]].values.tolist()
+
+                            folium.PolyLine(
+                                locations=points,
+                                color=color,
+                                weight=2,
+                                opacity=0.5,
+                                popup=f"สายรถ: {truck_id}"
+                            ).add_to(routes_layer)
+
+                    # --- Layer: ความหนาแน่น ---
+                    if show_heatmap:
+                        heat_data = display_df[["_lat", "_lon"]].values.tolist()
+                        HeatMap(
+                            heat_data,
+                            radius=18,
+                            blur=25,
+                            max_zoom=13,
+                            name="ความหนาแน่น"
                         ).add_to(m2)
+
+                    # ปุ่มควบคุม layer บนแผนที่
+                    folium.LayerControl(collapsed=False).add_to(m2)
 
                 components.html(m2.get_root().render(), height=500)
 
@@ -431,7 +478,7 @@ with tab3:
         st.download_button(
             "📥 ดาวน์โหลดรายงาน (CSV)",
             csv,
-            "route_rebalance_v10_2.csv",
+            "route_rebalance_v10_3.csv",
             "text/csv",
             use_container_width=True
         )

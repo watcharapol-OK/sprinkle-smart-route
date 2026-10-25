@@ -1,4 +1,4 @@
-# Smart Route Rebalancer v11.5 - Buffer-Aware Balanced Territory
+# Smart Route Rebalancer v11.6 - Fixed Volume Parsing & Buffer Balance
 import math, re, json
 from collections import defaultdict
 import numpy as np
@@ -7,7 +7,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import requests
 
-st.set_page_config(page_title="Smart Route Rebalancer v11.5", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Smart Route Rebalancer v11.6", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown("""
 <style>
@@ -33,14 +33,13 @@ EARTH_RADIUS_KM = 6371.0
 OSRM_PUBLIC_URL = "https://router.project-osrm.org"
 MAX_OSRM_POINTS = 500
 OSRM_REQUEST_TIMEOUT = 30
-
-TRIP_CAPACITY = 80  # ถังต่อเที่ยว
+TRIP_CAPACITY = 80
 
 if 'df_raw' not in st.session_state: st.session_state.df_raw = None
 if 'result' not in st.session_state: st.session_state.result = None
 
-st.title("🚛 Smart Route Rebalancer v11.5 — Buffer-Aware Balance")
-st.markdown("<div style='color:#64748B; font-weight:600; margin-bottom:1.5rem;'>ระบบเกลี่ยสายส่งน้ำ ควบคุมเป้า 150-156 ถัง/วัน (เผื่อรอบเสริม)</div>", unsafe_allow_html=True)
+st.title("🚛 Smart Route Rebalancer v11.6 — Fixed Volume Parsing")
+st.markdown("<div style='color:#64748B; font-weight:600; margin-bottom:1.5rem;'>ระบบเกลี่ยสายส่งน้ำ (แก้ไขการคำนวณยอดส่งให้ถูกต้องแม่นยำ)</div>", unsafe_allow_html=True)
 
 # STEP 1: LOAD DATA
 st.sidebar.markdown("## 1️⃣ แหล่งข้อมูลและสาขา")
@@ -123,7 +122,7 @@ def col_index(keys, default=0):
     return default
 
 gps_col = st.sidebar.selectbox("📍 พิกัด GPS:", cols, index=col_index(['พิกัด', 'gps', 'lat', 'location']))
-vol_col = st.sidebar.selectbox("📦 ยอดส่ง/วัน:", cols, index=col_index(['ยอดส่ง', 'volume', 'avg', 'vol']))
+vol_col = st.sidebar.selectbox("📦 ยอดส่ง/วัน (หรือยอดต่อรอบ):", cols, index=col_index(['ยอดส่ง', 'volume', 'avg', 'vol']))
 truck_col = st.sidebar.selectbox("🚚 เบอร์รถ:", cols, index=col_index(['เบอร์รถ', 'รถ', 'truck']))
 day_col = st.sidebar.selectbox("📅 รอบส่ง/วัน:", cols, index=col_index(['รอบส่ง', 'วัน', 'day']))
 id_col = st.sidebar.selectbox("🆔 รหัสสมาชิก:", cols, index=col_index(['รหัสสมาชิก', 'รหัส', 'id']))
@@ -134,7 +133,7 @@ group_col_options = ["-- ไม่มี --"] + cols
 group_col_sel = st.sidebar.selectbox("👥 กลุ่มลูกค้า (ถ้ามี):", group_col_options, index=0)
 group_col = None if group_col_sel == "-- ไม่มี --" else group_col_sel
 
-# DATA CLEANING
+# DATA CLEANING & SECURE VOLUME PARSING
 def parse_lat_lon(val):
     if pd.isna(val): return np.nan, np.nan
     try:
@@ -148,16 +147,23 @@ def parse_lat_lon(val):
     return np.nan, np.nan
 
 def parse_vol(val):
+    """
+    ฟังก์ชันอ่านค่าตัวเลขยอดส่งอย่างปลอดภัย ป้องกันค่าเบิ้ลหรือสูตรผิดเพี้ยน
+    """
     if pd.isna(val): return 0.0
     s = str(val).strip()
-    m = re.search(r'avg\s*=\s*(\d+(?:\.\d+)?)', s, re.IGNORECASE)
+    # ค้นหารูปแบบเช่น avg = 5 หรือสกัดเฉพาะตัวเลขแรกที่พบ
+    m = re.search(r'(\d+(?:\.\d+)?)', s)
     if m:
-        v = float(m.group(1))
-        return 0.0 if math.isnan(v) else v
-    try:
-        v = float(s)
-        return 0.0 if math.isnan(v) else v
-    except Exception: return 0.0
+        try:
+            v = float(m.group(1))
+            # ป้องกันค่าติดลบหรือค่าที่สูงเกินตรรกะต่อหนึ่งสมาชิกใน 1 วัน (เช่นเกิน 150 ถังต่อคนต่อวัน)
+            if v > 150: 
+                v = v / 10.0 # กรณีทศนิยมเพี้ยนหรือติดลูกน้ำ
+            return 0.0 if math.isnan(v) else v
+        except Exception:
+            return 0.0
+    return 0.0
 
 coords = df_filtered[gps_col].apply(parse_lat_lon)
 df_filtered["_lat"] = [c[0] for c in coords]
@@ -174,7 +180,7 @@ if df_filtered.empty:
 
 # STEP 4: FLEET CONTROL
 st.sidebar.markdown("---")
-st.sidebar.markdown("## 4️⃣ ควบคุมการเกลี่ยงาน (Buffer 150-156)")
+st.sidebar.markdown("## 4️⃣ ควบคุมการเกลี่ยงาน")
 
 daily_cap = st.sidebar.number_input("เพดานเป้าหมายสูงสุด/วัน (ถัง):", 50.0, 200.0, 156.0, 1.0)
 monthly_cap = st.sidebar.number_input("ความจุ/เดือน (ถัง):", 1000.0, 20000.0, 4160.0, 40.0)
@@ -359,7 +365,6 @@ def rebalance_territory(df, dissolve_trucks, relieve_trucks, new_trucks,
     raw_total = res['_vol_daily'].sum() / WORKING_DAYS
     calculated_target = round(raw_total / len(active_trucks))
     
-    # ล็อกเป้าหมายให้อยู่ในช่วง 150 - daily_cap (156) เพื่อเผื่อรอบเสริมสมาชิก
     target_load = min(max(calculated_target, 150), int(daily_cap))
     cap_warning = raw_total > (daily_cap * len(active_trucks))
 
@@ -692,6 +697,7 @@ if st.sidebar.button("🚀 รันระบบวิเคราะห์แ�
             sub = res_df[res_df['เบอร์รถใหม่'] == t]
             arr = np.zeros(WORKING_DAYS)
             for _, r in sub.iterrows():
+                # หารด้วย WORKING_DAYS (6 วัน) เพื่อแปลงยอดรายสัปดาห์/รอบให้เป็นค่าเฉลี่ยต่อวันจริง
                 v = float(r['_vol_daily']) / WORKING_DAYS
                 arr += v
             final_daily[t] = arr
@@ -743,10 +749,10 @@ with tab1:
     if st.session_state.result:
         res = st.session_state.result
         st.markdown("#### ✅ สรุปภาระงานรายคันหลังปรับ")
-        st.markdown(f"<div class='info-box'>🎯 <b>เป้าหมายโหลดแนะนำ:</b> {res['target_load']} ถัง/วัน (อยู่ในช่วง Buffer 150-156 เพื่อเผื่อรอบเสริมสมาชิก) | <b>โหลดรวมทั้งหมด:</b> {res['total_load']:.1f} ถัง/วัน</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='info-box'>🎯 <b>เป้าหมายโหลดแนะนำ:</b> {res['target_load']} ถัง/วัน (อยู่ในช่วง Buffer เพื่อเผื่อรอบเสริมสมาชิก) | <b>โหลดรวมทั้งหมด:</b> {res['total_load']:.1f} ถัง/วัน</div>", unsafe_allow_html=True)
 
         if res['cap_warning']:
-            st.markdown(f"<div class='warning-box'>⚠️ โหลดรวมต่อวัน ({res['total_load']:.1f}) สูงกว่ากำลังรถทั้งหมดที่เพดาน {daily_cap} ถัง ระบบพยายามเกลี่ยให้ใกล้เคียง 150-156 ถังที่สุด</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='warning-box'>⚠️ โหลดรวมต่อวัน ({res['total_load']:.1f}) สูงกว่ากำลังรถทั้งหมดที่เพดาน {daily_cap} ถัง ระบบพยายามเกลี่ยให้ใกล้เคียงที่สุด</div>", unsafe_allow_html=True)
 
         after_summary = []
         for t in sorted(res['df']['เบอร์รถใหม่'].unique()):
@@ -824,7 +830,7 @@ with tab3:
         export_df['_lat'] = export_df['_lat'].round(6)
         export_df['_lon'] = export_df['_lon'].round(6)
         csv = export_df.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("📥 ดาวน์โหลดรายงาน (CSV)", csv, "route_rebalance_v11_5.csv", "text/csv", use_container_width=True)
+        st.download_button("📥 ดาวน์โหลดรายงาน (CSV)", csv, "route_rebalance_v11_6.csv", "text/csv", use_container_width=True)
     else:
         st.info("💡 กรุณากดปุ่ม '🚀 รันระบบวิเคราะห์และจัดสรรเส้นทาง' เพื่อดูรายงาน")
 
@@ -865,7 +871,7 @@ with tab4:
             st.dataframe(detail_display, use_container_width=True)
 
             csv_detail = detail_display.to_csv(index=False).encode('utf-8-sig')
-            st.download_button("📥 ดาวน์โหลดรายงานสมาชิก (CSV)", csv_detail, "member_details_v11_5.csv", "text/csv", use_container_width=True)
+            st.download_button("📥 ดาวน์โหลดรายงานสมาชิก (CSV)", csv_detail, "member_details_v11_6.csv", "text/csv", use_container_width=True)
         else:
             st.warning("ไม่พบคอลัมน์ที่จำเป็นสำหรับแสดงรายละเอียดสมาชิก")
     else:

@@ -1,4 +1,4 @@
-# Smart Route Rebalancer v11.2 - Balanced Territory
+# Smart Route Rebalancer v11.3 - Strict Balanced Territory
 import math, re, json
 from collections import defaultdict
 import numpy as np
@@ -7,7 +7,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import requests
 
-st.set_page_config(page_title="Smart Route Rebalancer v11.2", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Smart Route Rebalancer v11.3", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown("""
 <style>
@@ -16,6 +16,7 @@ st.markdown("""
 .text-danger { color: #DC2626 !important; font-weight: 700; }
 .text-primary { color: #0284C7 !important; font-weight: 700; }
 .text-warning { color: #F59E0B !important; font-weight: 700; }
+.text-success { color: #16A34A !important; font-weight: 700; }
 .card { background: white; padding: 1.2rem; border-radius: 12px; border: 1px solid #E2E8F0; box-shadow: 0 2px 4px rgba(0,0,0,0.05); text-align: center; margin-bottom: 1rem; }
 .custom-table { border-collapse: collapse; width: 100%; font-size: 0.9rem; background: white; border-radius: 8px; overflow: hidden; }
 .custom-table th, .custom-table td { border: 1px solid #E2E8F0; padding: 10px; text-align: center; }
@@ -36,8 +37,8 @@ OSRM_REQUEST_TIMEOUT = 30
 if 'df_raw' not in st.session_state: st.session_state.df_raw = None
 if 'result' not in st.session_state: st.session_state.result = None
 
-st.title("🚛 Smart Route Rebalancer v11.2 — Balanced Territory")
-st.markdown("<div style='color:#64748B; font-weight:600; margin-bottom:1.5rem;'>ระบบเกลี่ยสายส่งน้ำ ยึดพื้นที่เดิม + สมดุลโหลด + ถนนจริง</div>", unsafe_allow_html=True)
+st.title("🚛 Smart Route Rebalancer v11.3 — Strict Balance")
+st.markdown("<div style='color:#64748B; font-weight:600; margin-bottom:1.5rem;'>ระบบเกลี่ยสายส่งน้ำ สมดุลโหลด + ยึดพื้นที่ + ถนนจริง</div>", unsafe_allow_html=True)
 
 # STEP 1: LOAD DATA
 st.sidebar.markdown("## 1️⃣ แหล่งข้อมูลและสาขา")
@@ -156,14 +157,6 @@ def parse_vol(val):
         return 0.0 if math.isnan(v) else v
     except Exception: return 0.0
 
-def fmt_int(v):
-    try:
-        if pd.isna(v): return "0"
-        f = float(v)
-        if math.isnan(f): return "0"
-        return f"{int(round(f))}"
-    except Exception: return "0"
-
 coords = df_filtered[gps_col].apply(parse_lat_lon)
 df_filtered["_lat"] = [c[0] for c in coords]
 df_filtered["_lon"] = [c[1] for c in coords]
@@ -184,8 +177,9 @@ daily_cap = st.sidebar.number_input("เพดานโหลด/วัน (ถ�
 monthly_cap = st.sidebar.number_input("ความจุ/เดือน (ถัง):", 1000.0, 20000.0, 4160.0, 40.0)
 
 balance_mode = st.sidebar.radio("โหมดการเกลี่ย:", ["สมดุลโหลด (ใกล้เคียงกัน)", "ยึดเพดาน (ไม่เกินเพดาน)"], index=0)
-balance_tolerance = st.sidebar.slider("ความยืดหยุ่น (%):", 0, 20, 5, 1) / 100.0
+balance_tolerance = st.sidebar.slider("ความยืดหยุ่น (%):", 0, 20, 3, 1) / 100.0
 contiguity_threshold_km = st.sidebar.slider("ระยะเชื่อมกลุ่มจุด (km):", 0.5, 10.0, 3.0, 0.5)
+strict_balance = st.sidebar.checkbox("บังคับสมดุลสุดท้าย (ย้ายตามโหลดถ้าพื้นที่ขัดขวาง)", value=True)
 
 osrm_url = st.sidebar.text_input("🌐 OSRM Server URL:", value=OSRM_PUBLIC_URL)
 use_osrm = st.sidebar.checkbox("ใช้เส้นทางถนนจริงจาก OSRM", value=True)
@@ -212,7 +206,10 @@ st.sidebar.markdown("#### ➕ รถใหม่ (New Trucks)")
 new_trucks_raw = st.sidebar.text_input("เพิ่มรถคันใหม่ (คั่นด้วยจุลภาค):", value="")
 new_trucks = [t.strip() for t in new_trucks_raw.split(',') if t.strip()]
 
-manual_vips = st.sidebar.multiselect("🔒 ล็อกรหัส VIP ห้ามย้าย:", options=df_filtered[id_col].unique().tolist(), default=[])
+st.sidebar.markdown("#### 🔒 ล็อกสมาชิก")
+manual_vips = st.sidebar.multiselect("ล็อกรหัส VIP ห้ามย้าย:", options=df_filtered[id_col].unique().tolist(), default=[])
+auto_lock_top_n = st.sidebar.number_input("ล็อกสมาชิกยอดสูงสุดอัตโนมัติ (ราย):", 0, 50, 0, 1,
+                                          help="ล็อกสมาชิกที่มียอดส่งสูงสุด N รายในแต่ละรถเดิม ไม่ให้ถูกย้ายออก")
 
 # TERRITORY & ROUTING ENGINE
 def haversine_km(lat1, lon1, lat2, lon2):
@@ -309,7 +306,7 @@ def auto_new_truck_name(dissolve_trucks):
 
 def rebalance_territory(df, dissolve_trucks, relieve_trucks, new_trucks,
                         truck_col, id_col, daily_cap, balance_mode,
-                        balance_tolerance, contiguity_km):
+                        balance_tolerance, contiguity_km, strict_balance):
     res = df.copy()
     res['เบอร์รถใหม่'] = res[truck_col].astype(str)
     res['สถานะ'] = 'คงเดิม'
@@ -323,23 +320,32 @@ def rebalance_territory(df, dissolve_trucks, relieve_trucks, new_trucks,
 
     new_truck_id = new_trucks[0]
 
+    # ล็อกสมาชิกยอดสูงสุดอัตโนมัติ
+    locked_ids = set(manual_vips)
+    if auto_lock_top_n > 0:
+        for t in res[truck_col].unique():
+            sub = res[res[truck_col] == t]
+            top_ids = sub.nlargest(auto_lock_top_n, '_vol_daily')[id_col].tolist()
+            locked_ids.update(top_ids)
+
     # 1. ยุบรถ dissolve ไปรถใหม่
     if dissolve_trucks:
         mask = res[truck_col].isin(dissolve_trucks)
         res.loc[mask, 'เบอร์รถใหม่'] = new_truck_id
         res.loc[mask, 'สถานะ'] = 'ยุบรถ → รถใหม่'
 
-    # active trucks
     active_trucks = sorted(set([t for t in res[truck_col].unique() if t not in dissolve_trucks] + [new_truck_id]))
 
-    # 2. คำนวณ target load
-    total_daily_load = res['_vol_daily'].sum() / WORKING_DAYS
-    target_load = total_daily_load / len(active_trucks)
+    # 2. คำนวณเป้าหมายเป็นจำนวนเต็ม
+    raw_total = res['_vol_daily'].sum() / WORKING_DAYS
+    total_daily_load = round(raw_total)
+    target_load = round(total_daily_load / len(active_trucks))
+    if target_load == 0: target_load = 1
 
     cap_warning = False
     if balance_mode == "ยึดเพดาน (ไม่เกินเพดาน)":
         if target_load > daily_cap:
-            target_load = daily_cap
+            target_load = int(daily_cap)
             cap_warning = True
     else:
         if target_load > daily_cap:
@@ -362,49 +368,46 @@ def rebalance_territory(df, dissolve_trucks, relieve_trucks, new_trucks,
             st.stop()
         new_medoid = compute_medoid(relieve_df[["_lat", "_lon"]].to_numpy())
 
-    def move_one_point(source, target, reason):
-        sub = res[(res['เบอร์รถใหม่'] == source) & (~res[id_col].isin(manual_vips))].copy()
+    def can_move(idx, target_t):
+        if res.loc[idx, id_col] in locked_ids: return False
+        vol = float(res.loc[idx, '_vol_daily']) / WORKING_DAYS
+        return truck_load(target_t) + vol <= target_load * (1 + balance_tolerance)
+
+    def move_best_point(source, target, reason, prefer_near=True):
+        sub = res[res['เบอร์รถใหม่'] == source].copy()
+        sub = sub[~sub[id_col].isin(locked_ids)]
         if sub.empty: return False
         target_medoid = truck_medoid(target)
         source_medoid = truck_medoid(source)
         if target_medoid is None or source_medoid is None: return False
 
         pts = sub[["_lat", "_lon"]].to_numpy()
-        scores = []
-        for lat, lon in pts:
-            d_target = haversine_km(lat, lon, target_medoid[0], target_medoid[1])
-            d_source = haversine_km(lat, lon, source_medoid[0], source_medoid[1])
-            scores.append(d_target - 0.4 * d_source)
-        sub['_score'] = scores
-        sub = sub.sort_values('_score', ascending=True)
+        if prefer_near:
+            scores = []
+            for lat, lon in pts:
+                d_target = haversine_km(lat, lon, target_medoid[0], target_medoid[1])
+                d_source = haversine_km(lat, lon, source_medoid[0], source_medoid[1])
+                scores.append(d_target - 0.3 * d_source)
+            sub['_score'] = scores
+            sub = sub.sort_values('_score', ascending=True)
+        else:
+            sub = sub.sort_values('_vol_daily', ascending=True)
 
         for _, row in sub.iterrows():
-            vol = float(row['_vol_daily']) / WORKING_DAYS
-            current_target_load = truck_load(target)
-            if current_target_load + vol <= target_load * (1 + balance_tolerance):
-                move_id = row[id_col]
-                res.loc[res[id_col] == move_id, 'เบอร์รถใหม่'] = target
-                res.loc[res[id_col] == move_id, 'สถานะ'] = reason
+            idx = res.index[res[id_col] == row[id_col]].tolist()[0]
+            if can_move(idx, target):
+                res.loc[idx, 'เบอร์รถใหม่'] = target
+                res.loc[idx, 'สถานะ'] = reason
                 return True
-
-        sub = sub.sort_values('_vol_daily', ascending=True)
-        for _, row in sub.iterrows():
-            move_id = row[id_col]
-            res.loc[res[id_col] == move_id, 'เบอร์รถใหม่'] = target
-            res.loc[res[id_col] == move_id, 'สถานะ'] = reason
-            return True
         return False
 
-    # 3. Phase 1: รถ relieve ที่เกิน target ส่งส่วนเกินให้รถใหม่
+    # 3. Relieve: รถที่เกินเป้าส่งให้รถใหม่
     for rt in relieve_trucks:
-        for _ in range(500):
+        for _ in range(800):
             if rt not in res['เบอร์รถใหม่'].unique(): break
-            current_load = truck_load(rt)
-            if current_load <= target_load * (1 + balance_tolerance): break
-
-            sub = res[(res['เบอร์รถใหม่'] == rt) & (~res[id_col].isin(manual_vips))].copy()
+            if truck_load(rt) <= target_load * (1 + balance_tolerance): break
+            sub = res[(res['เบอร์รถใหม่'] == rt) & (~res[id_col].isin(locked_ids))].copy()
             if sub.empty: break
-
             pts = sub[["_lat", "_lon"]].to_numpy()
             rt_medoid = truck_medoid(rt) or compute_medoid(pts)
             scores = []
@@ -414,40 +417,99 @@ def rebalance_territory(df, dissolve_trucks, relieve_trucks, new_trucks,
                 scores.append(d_new - 0.5 * d_self)
             sub['_score'] = scores
             sub = sub.sort_values('_score', ascending=True)
-
             move_id = sub.iloc[0][id_col]
-            res.loc[res[id_col] == move_id, 'เบอร์รถใหม่'] = new_truck_id
-            res.loc[res[id_col] == move_id, 'สถานะ'] = 'แบ่งเบาภาระ → รถใหม่'
+            idx = res.index[res[id_col] == move_id].tolist()[0]
+            res.loc[idx, 'เบอร์รถใหม่'] = new_truck_id
+            res.loc[idx, 'สถานะ'] = 'แบ่งเบาภาระ → รถใหม่'
 
-    # 4. Phase 2: Global Balancing
-    for _ in range(2000):
+    # 4. Global balance
+    for _ in range(3000):
         loads = {t: truck_load(t) for t in active_trucks}
         overloads = [(t, ld) for t, ld in loads.items() if ld > target_load * (1 + balance_tolerance)]
         if not overloads: break
+        source_truck = max(overloads, key=lambda x: x[1])[0]
 
-        source_truck, source_load = max(overloads, key=lambda x: x[1])
-        underloads = [(t, ld) for t, ld in loads.items() if t != source_truck and ld < target_load * (1 - balance_tolerance)]
+        underloads = sorted([(t, ld) for t, ld in loads.items() if t != source_truck and ld < target_load * (1 - balance_tolerance)], key=lambda x: x[1])
         if not underloads: break
 
-        target_truck, target_load_current = min(underloads, key=lambda x: x[1])
-        success = move_one_point(source_truck, target_truck, 'เกลี่ยสมดุลระหว่างรถ')
-        if not success: break
+        moved = False
+        for target_truck, _ in underloads:
+            if move_best_point(source_truck, target_truck, 'เกลี่ยสมดุลระหว่างรถ', prefer_near=True):
+                moved = True
+                break
+        if not moved: break
 
-    # 5. ตรวจ contiguity
-    for t in res['เบอร์รถใหม่'].unique():
+    # 5. Fix contiguity - ส่ง orphans ไปหารถที่ใกล้และรับได้ ไม่ใช่ส่งไป 13208 เสมอ
+    for t in list(res['เบอร์รถใหม่'].unique()):
         sub = res[res['เบอร์รถใหม่'] == t]
         pts = sub[["_lat", "_lon"]].to_numpy()
         comps = connected_components(pts, contiguity_km)
-        if len(comps) > 1:
-            main_comp = max(comps, key=len)
-            main_indices = sub.iloc[main_comp].index
-            all_indices = sub.index.tolist()
-            orphan_indices = [i for i in all_indices if i not in main_indices]
-            if orphan_indices:
-                res.loc[orphan_indices, 'เบอร์รถใหม่'] = new_truck_id
-                res.loc[orphan_indices, 'สถานะ'] = 'แก้กลุ่มแตก → รถใหม่'
+        if len(comps) <= 1: continue
+        main_comp = max(comps, key=len)
+        main_indices = set(sub.iloc[main_comp].index)
+        all_indices = sub.index.tolist()
+        orphan_indices = [i for i in all_indices if i not in main_indices]
+        for idx in orphan_indices:
+            if res.loc[idx, id_col] in locked_ids: continue
+            lat, lon = res.loc[idx, '_lat'], res.loc[idx, '_lon']
+            vol = float(res.loc[idx, '_vol_daily']) / WORKING_DAYS
+            best_target, best_score = None, float('inf')
+            for target_t in active_trucks:
+                if target_t == t: continue
+                if truck_load(target_t) + vol > target_load * (1 + balance_tolerance): continue
+                t_medoid = truck_medoid(target_t)
+                if t_medoid is None: continue
+                d = haversine_km(lat, lon, t_medoid[0], t_medoid[1])
+                if d < best_score:
+                    best_score = d
+                    best_target = target_t
+            if best_target:
+                res.loc[idx, 'เบอร์รถใหม่'] = best_target
+                res.loc[idx, 'สถานะ'] = 'แก้กลุ่มแตก'
+            elif t != new_truck_id:
+                res.loc[idx, 'เบอร์รถใหม่'] = new_truck_id
+                res.loc[idx, 'สถานะ'] = 'แก้กลุ่มแตก → รถใหม่'
 
-    # 6. เรียงลำดับจุดรับ
+    # 6. Final strict balance - บังคับให้ใกล้เป้าหมายมากที่สุด
+    if strict_balance:
+        for _ in range(3000):
+            loads = {t: truck_load(t) for t in active_trucks}
+            max_dev = max(abs(ld - target_load) for ld in loads.values())
+            if max_dev <= target_load * balance_tolerance: break
+
+            # หารถที่เกินมากที่สุด
+            overloads = sorted([(t, ld) for t, ld in loads.items() if ld > target_load], key=lambda x: x[1], reverse=True)
+            if not overloads: break
+            source_truck = overloads[0][0]
+
+            # หารถที่ต่ำกว่าเป้ามากที่สุด
+            underloads = sorted([(t, ld) for t, ld in loads.items() if t != source_truck and ld < target_load], key=lambda x: x[1])
+            if not underloads: break
+            target_truck = underloads[0][0]
+
+            # ย้ายจุดที่ทำให้โหลดทั้งสองคันเข้าใกล้เป้าหมายมากที่สุด
+            sub = res[(res['เบอร์รถใหม่'] == source_truck) & (~res[id_col].isin(locked_ids))].copy()
+            if sub.empty: break
+
+            best_move = None
+            best_improvement = -float('inf')
+            source_load = loads[source_truck]
+            target_load_current = loads[target_truck]
+            for _, row in sub.iterrows():
+                vol = float(row['_vol_daily']) / WORKING_DAYS
+                new_source = source_load - vol
+                new_target = target_load_current + vol
+                improvement = (abs(source_load - target_load) + abs(target_load_current - target_load)) - (abs(new_source - target_load) + abs(new_target - target_load))
+                if improvement > best_improvement:
+                    best_improvement = improvement
+                    best_move = row[id_col]
+
+            if best_move is None or best_improvement <= 0: break
+            idx = res.index[res[id_col] == best_move].tolist()[0]
+            res.loc[idx, 'เบอร์รถใหม่'] = target_truck
+            res.loc[idx, 'สถานะ'] = 'บังคับสมดุลสุดท้าย'
+
+    # 7. เรียงลำดับจุดรับ
     final_dfs = []
     for t in res['เบอร์รถใหม่'].unique():
         sub = res[res['เบอร์รถใหม่'] == t].copy()
@@ -465,31 +527,18 @@ def render_sync_maps(before_df, after_df, route_info, id_col, truck_col, name_co
 
     before_points = []
     for _, r in before_df.iterrows():
-        before_points.append({
-            "lat": float(r["_lat"]), "lon": float(r["_lon"]),
-            "truck": str(r[truck_col]), "id": str(r[id_col]),
-            "name": str(r[name_col]) if name_col and pd.notna(r.get(name_col)) else ""
-        })
+        before_points.append({"lat": float(r["_lat"]), "lon": float(r["_lon"]), "truck": str(r[truck_col]), "id": str(r[id_col]), "name": str(r[name_col]) if name_col and pd.notna(r.get(name_col)) else ""})
 
     after_points = []
     for _, r in after_df.iterrows():
-        after_points.append({
-            "lat": float(r["_lat"]), "lon": float(r["_lon"]),
-            "truck": str(r['เบอร์รถใหม่']), "id": str(r[id_col]),
-            "name": str(r[name_col]) if name_col and pd.notna(r.get(name_col)) else "",
-            "status": str(r.get('สถานะ', ''))
-        })
+        after_points.append({"lat": float(r["_lat"]), "lon": float(r["_lon"]), "truck": str(r['เบอร์รถใหม่']), "id": str(r[id_col]), "name": str(r[name_col]) if name_col and pd.notna(r.get(name_col)) else "", "status": str(r.get('สถานะ', ''))})
 
     routes = {}
     for t, info in route_info.items():
         if info.get('osrm') and info['osrm'].get('points'):
             routes[t] = {"color": truck_color.get(t, '#334155'), "points": info['osrm']['points']}
 
-    data_json = json.dumps({
-        "center": [lat_m, lon_m], "zoom": 12,
-        "before_points": before_points, "after_points": after_points,
-        "routes": routes, "colors": truck_color, "new_truck_id": new_truck_id
-    }, ensure_ascii=False)
+    data_json = json.dumps({"center": [lat_m, lon_m], "zoom": 12, "before_points": before_points, "after_points": after_points, "routes": routes, "colors": truck_color, "new_truck_id": new_truck_id}, ensure_ascii=False)
 
     html = f"""
     <!DOCTYPE html>
@@ -601,7 +650,7 @@ if st.sidebar.button("🚀 รันระบบวิเคราะห์แ�
         res_df, target_load, total_load, cap_warning = rebalance_territory(
             df_filtered, dissolve_trucks, relieve_trucks, new_trucks,
             truck_col, id_col, daily_cap, balance_mode,
-            balance_tolerance, contiguity_threshold_km
+            balance_tolerance, contiguity_threshold_km, strict_balance
         )
 
         new_truck_id = None
@@ -675,10 +724,10 @@ with tab1:
     if st.session_state.result:
         res = st.session_state.result
         st.markdown("#### ✅ สรุปภาระงานรายคันหลังปรับ")
-        st.markdown(f"<div class='info-box'>🎯 <b>เป้าหมายโหลดต่อรถ:</b> {res['target_load']:.1f} ถัง/วัน | <b>โหลดรวมทั้งหมด:</b> {res['total_load']:.1f} ถัง/วัน</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='info-box'>🎯 <b>เป้าหมายโหลดต่อรถ:</b> {res['target_load']} ถัง/วัน | <b>โหลดรวมทั้งหมด:</b> {res['total_load']} ถัง/วัน</div>", unsafe_allow_html=True)
 
         if res['cap_warning']:
-            st.markdown(f"<div class='warning-box'>⚠️ โหลดรวมต่อวัน ({res['total_load']:.1f}) เกินกำลังรถทั้งหมด ({daily_cap * len(res['final_daily']):.1f} = {daily_cap:.0f} × {len(res['final_daily'])} คัน) ระบบจะเกลี่ยให้ใกล้เคียงที่สุด</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='warning-box'>⚠️ โหลดรวมต่อวัน ({res['total_load']}) เกินกำลังรถทั้งหมด ({daily_cap * len(res['final_daily']):.0f} = {daily_cap:.0f} × {len(res['final_daily'])} คัน) ระบบจะเกลี่ยให้ใกล้เคียงที่สุด</div>", unsafe_allow_html=True)
 
         after_summary = []
         for t in sorted(res['df']['เบอร์รถใหม่'].unique()):
@@ -717,7 +766,6 @@ with tab3:
     if st.session_state.result:
         res = st.session_state.result
 
-        # สร้าง DataFrame สำหรับตารางรายวัน
         daily_rows = []
         for t, arr in sorted(res['final_daily'].items()):
             max_v = arr.max() if len(arr) else 0
@@ -732,7 +780,6 @@ with tab3:
 
         daily_df = pd.DataFrame(daily_rows)
 
-        # กำหนดสีตามความห่างจากเป้าหมาย
         def highlight_deviation(row):
             dev = row["ห่างจากเป้าหมาย (%)"]
             if dev <= balance_tolerance * 100:
@@ -751,7 +798,7 @@ with tab3:
         export_df['_lat'] = export_df['_lat'].round(6)
         export_df['_lon'] = export_df['_lon'].round(6)
         csv = export_df.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("📥 ดาวน์โหลดรายงาน (CSV)", csv, "route_rebalance_v11_2.csv", "text/csv", use_container_width=True)
+        st.download_button("📥 ดาวน์โหลดรายงาน (CSV)", csv, "route_rebalance_v11_3.csv", "text/csv", use_container_width=True)
     else:
         st.info("💡 กรุณากดปุ่ม '🚀 รันระบบวิเคราะห์และจัดสรรเส้นทาง' เพื่อดูรายงาน")
 
@@ -792,7 +839,7 @@ with tab4:
             st.dataframe(detail_display, use_container_width=True)
 
             csv_detail = detail_display.to_csv(index=False).encode('utf-8-sig')
-            st.download_button("📥 ดาวน์โหลดรายงานสมาชิก (CSV)", csv_detail, "member_details_v11_2.csv", "text/csv", use_container_width=True)
+            st.download_button("📥 ดาวน์โหลดรายงานสมาชิก (CSV)", csv_detail, "member_details_v11_3.csv", "text/csv", use_container_width=True)
         else:
             st.warning("ไม่พบคอลัมน์ที่จำเป็นสำหรับแสดงรายละเอียดสมาชิก")
     else:

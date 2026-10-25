@@ -1,15 +1,14 @@
-ขออภัยครับ โค้ดที่ส่งไปก่อนหน้านี้ขาดตอนท้ายไป นี่คือ **โค้ดใหม่ทั้งชุด v11.2 ที่แก้ไข syntax error และปรับปรุงการเกลี่ยงานให้สมดุลขึ้น** ครับ
+ขออภัยอีกครั้งครับ โค้ดถูกตัดขั้นกลางตอนส่ง นี่คือ **โค้ดใหม่ทั้งชุด v11.2 ฉบับสมบูรณ์** ครับ ให้ copy ทั้งหมดไปทับ `app.py` เลย
 
 ```python
 # =====================================================================================
 #  SMART ROUTE REBALANCER — TERRITORY-AWARE ENTERPRISE EDITION v11.2
-#  แก้ไข: SyntaxError ที่บรรทัด cls และปรับปรุงการเกลี่ยงานให้สมดุลกว่าเดิม
+#  แก้ไข: SyntaxError จากโค้ดที่ถูกตัด และปรับปรุงการเกลี่ยงานให้สมดุลกว่าเดิม
 # =====================================================================================
 
 import math
 import re
 import json
-from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 
 import numpy as np
@@ -499,7 +498,6 @@ def rebalance_territory(df, dissolve_trucks, relieve_trucks, new_trucks,
         for lat, lon in pts:
             d_target = haversine_km(lat, lon, target_medoid[0], target_medoid[1])
             d_source = haversine_km(lat, lon, source_medoid[0], source_medoid[1])
-            # ใกล้ target และอยู่ขอบของ source
             scores.append(d_target - 0.4 * d_source)
         sub['_score'] = scores
         sub = sub.sort_values('_score', ascending=True)
@@ -513,7 +511,6 @@ def rebalance_territory(df, dissolve_trucks, relieve_trucks, new_trucks,
                 res.loc[res[id_col] == move_id, 'สถานะ'] = reason
                 return True
 
-        # ถ้าไม่มีจุดที่ย้ายไปแล้วไม่เกิน target ให้ย้ายจุดเล็กสุด
         sub = sub.sort_values('_vol_daily', ascending=True)
         for _, row in sub.iterrows():
             move_id = row[id_col]
@@ -550,18 +547,15 @@ def rebalance_territory(df, dissolve_trucks, relieve_trucks, new_trucks,
             res.loc[res[id_col] == move_id, 'สถานะ'] = 'แบ่งเบาภาระ → รถใหม่'
 
     # 4. Phase 2: Global Balancing
-    # ทำซ้ำจนกว่าจะไม่มีรถที่เกิน target มาก หรือไม่มีรถที่ต่ำกว่า target มาก
     for _ in range(2000):
         loads = {t: truck_load(t) for t in active_trucks}
 
-        # หารถที่เกิน target มากที่สุด
         overloads = [(t, ld) for t, ld in loads.items() if ld > target_load * (1 + balance_tolerance)]
         if not overloads:
             break
 
         source_truck, source_load = max(overloads, key=lambda x: x[1])
 
-        # หารถที่ต่ำกว่า target มากที่สุด (รวมรถใหม่ด้วย)
         underloads = [(t, ld) for t, ld in loads.items()
                       if t != source_truck and ld < target_load * (1 - balance_tolerance)]
         if not underloads:
@@ -573,7 +567,7 @@ def rebalance_territory(df, dissolve_trucks, relieve_trucks, new_trucks,
         if not success:
             break
 
-    # 5. Phase 4: ตรวจ contiguity ของทุกรถ
+    # 5. Phase 3: ตรวจ contiguity ของทุกรถ
     for t in res['เบอร์รถใหม่'].unique():
         sub = res[res['เบอร์รถใหม่'] == t]
         pts = sub[["_lat", "_lon"]].to_numpy()
@@ -972,4 +966,8 @@ with tab3:
         )
         for t, arr in sorted(res['final_daily'].items()):
             max_v = arr.max() if len(arr) else 0
-            deviation = abs(max_v - res['target_load']) / res['target
+            deviation = abs(max_v - res['target_load']) / res['target_load'] * 100 if res['target_load'] > 0 else 0
+            if deviation <= balance_tolerance * 100:
+                cls = "text-primary"
+            elif deviation <= balance_tolerance * 200:
+                cls = "text
